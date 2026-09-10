@@ -17,8 +17,21 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
-  function apiHeaders() {
-    const h = { 'x-ig-app-id': APP_ID, 'x-requested-with': 'XMLHttpRequest', 'x-asbd-id': '129477', accept: '*/*' };
+  // Instagram sometimes answers one shape of request with the web page instead of data, so every
+  // request can be made in several styles and the scan keeps whichever one works.
+  const APP_IDS = ['936619743392459', '1217981644879628'];
+  const REQUEST_STYLES = [
+    { id: 'web', host: 'https://www.instagram.com', appId: APP_IDS[0], xrw: true, accept: '*/*' },
+    { id: 'web-plain', host: 'https://www.instagram.com', appId: APP_IDS[0], xrw: false, accept: '*/*' },
+    { id: 'web-json', host: 'https://www.instagram.com', appId: APP_IDS[0], xrw: false, accept: 'application/json' },
+    { id: 'web-altapp', host: 'https://www.instagram.com', appId: APP_IDS[1], xrw: false, accept: '*/*' },
+    { id: 'i-api', host: 'https://i.instagram.com', appId: APP_IDS[0], xrw: false, accept: '*/*' },
+  ];
+  const styleById = (id) => REQUEST_STYLES.find((x) => x.id === id) || REQUEST_STYLES[0];
+
+  function apiHeaders(style = REQUEST_STYLES[0]) {
+    const h = { 'x-ig-app-id': style.appId, 'x-asbd-id': '129477', accept: style.accept };
+    if (style.xrw) h['x-requested-with'] = 'XMLHttpRequest';
     const csrf = cookie('csrftoken');
     if (csrf) h['x-csrftoken'] = csrf;
     try {
@@ -37,14 +50,14 @@
     try { await chrome.storage.local.set({ scanState: state.scan }); } catch {}
   }
 
-  async function request(path, { method = 'GET', body } = {}) {
-    const headers = apiHeaders();
+  async function request(path, { method = 'GET', body, style = REQUEST_STYLES[0] } = {}) {
+    const headers = apiHeaders(style);
     if (method === 'POST') headers['content-type'] = 'application/x-www-form-urlencoded';
-    const res = await fetch('https://www.instagram.com' + path, { method, headers, body, credentials: 'include' });
+    const res = await fetch(style.host + path, { method, headers, body, credentials: 'include' });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
-    return { status: res.status, json, text };
+    return { status: res.status, json, text, url: res.url, redirected: res.redirected, ct: res.headers.get('content-type') || '' };
   }
 
   const mapUser = (u) => ({
@@ -90,38 +103,65 @@
     }
   }
 
+  function pageHint(text, url) {
+    const t = (text.match(/<title[^>]*>([^<]{0,120})/i) || [])[1] || '';
+    if (/login|accounts\/login/i.test(url) || /log in/i.test(t)) return 'the login page';
+    if (/challenge|checkpoint/i.test(url)) return 'a security check page';
+    if (/page not found|not found/i.test(t)) return 'a "page not found" page';
+    return t ? `a web page titled "${t.trim()}"` : 'a web page instead of data';
+  }
+
   function describe(r) {
     const msg = (r.json && (r.json.message || r.json.error_title)) || '';
     if (msg) return msg;
     const body = (r.text || '').replace(/\s+/g, ' ').trim();
-    if (!r.json && /^</.test(body)) return 'a web page instead of data';
+    if (!r.json && /^</.test(body)) {
+      const where = r.redirected && r.url ? ` (redirected to ${String(r.url).replace(/^https?:\/\/(www\.)?instagram\.com/, '')})` : '';
+      return pageHint(r.text || '', r.url || '') + where;
+    }
     if (!body) return 'an empty reply';
     if (!r.json) return 'unreadable data: ' + body.slice(0, 80);
     return 'JSON without a user list (' + Object.keys(r.json).slice(0, 5).join(', ') + ')';
+  }
+
+  // Keep the first failing response of each kind so it can be read back later without dev tools.
+  async function keepSample(kind, path, r) {
+    try {
+      const g = await chrome.storage.local.get('lastFailure');
+      const store = g.lastFailure && Date.now() - g.lastFailure.at < 6 * 3600 * 1000 ? g.lastFailure : { at: Date.now(), samples: {} };
+      store.at = Date.now();
+      store.samples[kind] = {
+        at: Date.now(), path, status: r.status, url: r.url, redirected: !!r.redirected, ct: r.ct,
+        detail: describe(r), body: (r.text || '').replace(/\s+/g, ' ').slice(0, 600),
+      };
+      await chrome.storage.local.set({ lastFailure: store });
+    } catch {}
   }
 
   // A single GET.
   //   ok: true and json on success
   //   otherwise: { fatal } means stop the scan, { throttled } means Instagram is rate limiting,
   //   anything else is worth retrying with a different variant of the request.
-  async function tryJson(path) {
+  async function tryJson(path, style = REQUEST_STYLES[0], sampleKind = null) {
     let r;
-    try { r = await request(path); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
+    try { r = await request(path, { style }); } catch (e) { r = { status: 0, json: null, text: String(e), url: '', redirected: false, ct: '' }; }
     if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) return { ok: true, json: r.json, status: 200 };
     const msg = (r.json && (r.json.message || r.json.error_title)) || '';
     const detail = describe(r);
     const fatal = r.status === 401 || /login_required|checkpoint_required|challenge_required/i.test(msg);
-    return { ok: false, status: r.status, throttled: isThrottle(r, msg), fatal, detail, html: !r.json && /^\s*</.test(r.text || '') };
+    const html = !r.json && /^\s*</.test(r.text || '');
+    if (html && sampleKind) await keepSample(sampleKind, path, r);
+    return { ok: false, status: r.status, throttled: isThrottle(r, msg), fatal, detail, html, url: r.url, redirected: !!r.redirected, ct: r.ct };
   }
 
   // Retries a single request. Long backoff only for real rate limiting; everything else fails
   // fast so fetchList can try the request a different way.
-  async function getJson(path, { bestEffort = false, pacer = null, ctl = null, quick = false } = {}) {
+  async function getJson(path, { bestEffort = false, pacer = null, ctl = null, quick = false, style = REQUEST_STYLES[0], sampleKind = null } = {}) {
     let last = null;
     for (let attempt = 0; ; attempt++) {
       if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
       if (pacer) await pacer.wait();
-      const r = await tryJson(path);
+      const r = await tryJson(path, style, sampleKind);
       if (r.ok) { pacer?.success(); return r.json; }
       last = r;
       if (r.fatal) {
@@ -207,9 +247,9 @@
     const sizes = [maxSize, ...PAGE_SIZES.filter((s) => s < maxSize)];
     const surfaces = kind === 'followers' ? [true, false] : [false];
     const out = [];
-    for (const count of sizes) for (const surface of surfaces) out.push({ count, surface });
+    for (const style of REQUEST_STYLES) for (const count of sizes) for (const surface of surfaces) out.push({ count, surface, style: style.id });
     if (remembered) {
-      const i = out.findIndex((v) => v.count === remembered.count && v.surface === remembered.surface);
+      const i = out.findIndex((v) => v.count === remembered.count && v.surface === remembered.surface && v.style === remembered.style);
       if (i > 0) out.unshift(out.splice(i, 1)[0]);
     }
     return out;
@@ -221,6 +261,10 @@
     if (order) qs.set('order', order);
     if (surface) qs.set('search_surface', 'follow_list_page');
     return `/api/v1/friendships/${uid}/${kind}/?${qs}`;
+  }
+
+  function variantLabel(v) {
+    return `${v.count} per page${v.surface ? ' with search_surface' : ''}${v.style !== 'web' ? `, ${v.style} request style` : ''}`;
   }
 
   async function fetchList(kind, uid, expected, settings, opts = {}) {
@@ -247,7 +291,7 @@
       for (let tried = 0; tried < variants.length; tried++) {
         const v = variants[(vIdx + tried) % variants.length];
         try {
-          const json = await getJson(listPath(uid, kind, v, maxId, order), { bestEffort, pacer, ctl, quick: tried > 0 });
+          const json = await getJson(listPath(uid, kind, v, maxId, order), { bestEffort, pacer, ctl, quick: tried > 0, style: styleById(v.style), sampleKind: kind });
           if (tried > 0) {
             vIdx = (vIdx + tried) % variants.length;
             probe[kind] = { ...(probe[kind] || {}), v, forMax: maxSize, at: Date.now() };
@@ -258,13 +302,26 @@
           if (e.fatal) throw e;
           lastErr = e;
           if (state.prog) state.prog.pages++;
+          const nextV = variants[(vIdx + tried + 1) % variants.length];
           await writeState({
             ...progressFields(),
-            message: `${kind === 'followers' ? 'Followers' : 'Following'} request failed (${e.message}). Trying a different request shape`,
+            message: `${kind === 'followers' ? 'Followers' : 'Following'}: ${variantLabel(v)} failed (${e.message}). Trying ${variantLabel(nextV)}`,
           });
         }
       }
       throw lastErr || new ScanError('Instagram would not answer the list request.', true);
+    };
+
+    // Every shape we know was refused. Fall back to copying the request instagram.com itself made.
+    const tryLearned = async () => {
+      if (order || label) return null;
+      await writeState({ ...progressFields(), message: `Instagram refused every ${kind} request we know. Trying the one instagram.com itself uses` });
+      try {
+        return await fetchLearned(kind, expected, pacer, ctl, out);
+      } catch (e) {
+        if (e.fatal) throw e;
+        return null;
+      }
     };
 
     for (;;) {
@@ -272,8 +329,14 @@
       try {
         json = await fetchPage();
       } catch (e) {
-        if (bestEffort && !e.fatal) break;
-        throw e;
+        if (e.fatal) throw e;
+        if (!maxId) {
+          const learned = await tryLearned();
+          if (learned && learned.length) return learned;
+        }
+        if (bestEffort) break;
+        const hint = ' Open your followers list on instagram.com once so the extension can see how the site loads it, then scan again.';
+        throw new ScanError(e.message + (e.message.includes('instagram.com once') ? '' : hint), true, e.status);
       }
       const users = Array.isArray(json.users) ? json.users : [];
       if (!maxId && !order) {
@@ -310,49 +373,167 @@
     return out;
   }
 
-  // Try every shape of the list request once and report what Instagram said. Used by the
-  // Diagnostics button so a failing scan can be explained without opening dev tools.
+  // Try the list request in every shape and style once, and keep the answers so a failing scan
+  // can be explained later without opening dev tools.
   async function diagnose() {
     const uid = cookie('ds_user_id');
     if (!uid) return { ok: false, error: 'You are not logged in to Instagram in this browser.' };
     const rows = [];
-    const cases = [
-      ['Followers, 50 per page, with search_surface', 'followers', { count: 50, surface: true }],
-      ['Followers, 50 per page, no search_surface', 'followers', { count: 50, surface: false }],
-      ['Followers, 25 per page, with search_surface', 'followers', { count: 25, surface: true }],
-      ['Followers, 200 per page, with search_surface', 'followers', { count: 200, surface: true }],
-      ['Following, 200 per page', 'following', { count: 200, surface: false }],
-      ['Following, 50 per page', 'following', { count: 50, surface: false }],
-    ];
-    for (const [label, kind, v] of cases) {
+    const run = async (label, kind, v, style) => {
+      const path = kind === 'profile' ? `/api/v1/users/${uid}/info/` : listPath(uid, kind, v, null, null);
       const t0 = Date.now();
-      const r = await tryJson(listPath(uid, kind, v, null, null));
+      const r = await tryJson(path, style, null);
       rows.push({
-        label, ms: Date.now() - t0, status: r.status ?? 200,
+        label, kind, style: style.id, path, ms: Date.now() - t0, status: r.status ?? 200,
         ok: !!r.ok, users: r.ok ? (r.json.users || []).length : null,
         detail: r.ok ? null : r.detail, throttled: !!r.throttled, fatal: !!r.fatal,
+        redirected: !!r.redirected, url: r.url || '', ct: r.ct || '',
       });
-      await sleep(2000);
+      await sleep(1800);
+      return !!r.ok;
+    };
+    // Controls first: if these fail too, it is the session, not the followers endpoint.
+    await run('Your profile', 'profile', null, REQUEST_STYLES[0]);
+    await run('Following, 200 per page', 'following', { count: 200, surface: false }, REQUEST_STYLES[0]);
+    for (const style of REQUEST_STYLES) {
+      const okA = await run(`Followers, 50 per page, with search_surface, ${style.id}`, 'followers', { count: 50, surface: true }, style);
+      if (okA) break;
+      const okB = await run(`Followers, 50 per page, no search_surface, ${style.id}`, 'followers', { count: 50, surface: false }, style);
+      if (okB) break;
+      if (rows.some((x) => x.throttled || x.fatal)) break;
     }
-    let probe = {};
-    try { probe = (await chrome.storage.local.get('probe')).probe || {}; } catch {}
-    return { ok: true, rows, probe, at: Date.now() };
+    let probe = {}, lastFailure = null;
+    try {
+      const g = await chrome.storage.local.get(['probe', 'lastFailure']);
+      probe = g.probe || {};
+      lastFailure = g.lastFailure || null;
+    } catch {}
+    const result = { ok: true, rows, probe, lastFailure, at: Date.now() };
+    try { await chrome.storage.local.set({ lastDiag: result }); } catch {}
+    return result;
   }
 
-  // Does this account still exist? Used to tell "unfollowed you" from "deactivated".
-  async function accountStatus(pk, pacer, ctl) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (ctl?.cancel) return 'unknown';
+  // ---------- learning from Instagram's own website ----------
+
+  // observer.js (running in the page) reports the requests instagram.com makes for follower and
+  // following lists. We keep the newest of each so the scan can copy it when our own requests fail.
+  window.addEventListener('message', async (e) => {
+    if (e.source !== window || e.data?.source !== 'igfi-observer') return;
+    const t = e.data.template;
+    if (!t || (t.kind !== 'followers' && t.kind !== 'following')) return;
+    try {
+      const g = await chrome.storage.local.get('learned');
+      const learned = g.learned || {};
+      const prev = learned[t.kind];
+      if (prev && prev.url === t.url && prev.body === t.body) return;
+      learned[t.kind] = t;
+      await chrome.storage.local.set({ learned });
+    } catch {}
+  });
+
+  // Pull user records out of any response shape (the REST list, or a GraphQL result).
+  function extractUsers(json) {
+    const out = [];
+    const seen = new Set();
+    const visit = (v, depth) => {
+      if (!v || typeof v !== 'object' || depth > 12) return;
+      if (Array.isArray(v)) { for (const x of v) visit(x, depth + 1); return; }
+      const id = v.pk ?? v.pk_id ?? v.id;
+      if (v.username && id != null && /^\d+$/.test(String(id))) {
+        const m = mapUser({ ...v, pk: String(id) });
+        if (!seen.has(m.pk)) { seen.add(m.pk); out.push(m); }
+        return;
+      }
+      for (const k of Object.keys(v)) visit(v[k], depth + 1);
+    };
+    visit(json, 0);
+    return out;
+  }
+
+  function extractCursor(json) {
+    let cursor = null;
+    const visit = (v, depth) => {
+      if (cursor || !v || typeof v !== 'object' || depth > 12) return;
+      if (Array.isArray(v)) { for (const x of v) visit(x, depth + 1); return; }
+      if (v.next_max_id != null && v.next_max_id !== '') { cursor = { param: 'max_id', value: String(v.next_max_id) }; return; }
+      if (v.page_info && v.page_info.has_next_page && v.page_info.end_cursor) { cursor = { param: 'after', value: String(v.page_info.end_cursor) }; return; }
+      for (const k of Object.keys(v)) visit(v[k], depth + 1);
+    };
+    visit(json, 0);
+    return cursor;
+  }
+
+  // Replay a learned request, page by page.
+  async function fetchLearned(kind, expected, pacer, ctl, into) {
+    let learned = null;
+    try { learned = (await chrome.storage.local.get('learned')).learned?.[kind] || null; } catch {}
+    if (!learned) return null;
+    const out = into || [];
+    const seen = new Set(out.map((u) => u.pk));
+    let cursor = null;
+    let pages = 0;
+    const strm = state.prog?.k?.[kind];
+    for (;;) {
+      if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
+      const url = new URL(learned.url);
+      let body = learned.body;
+      if (cursor) {
+        if (learned.method === 'POST' && body) {
+          const params = new URLSearchParams(body);
+          const raw = params.get('variables');
+          if (raw) {
+            try {
+              const vars = JSON.parse(raw);
+              vars[cursor.param] = cursor.value;
+              params.set('variables', JSON.stringify(vars));
+              body = params.toString();
+            } catch { return out.length ? out : null; }
+          } else return out.length ? out : null;
+        } else {
+          url.searchParams.set(cursor.param, cursor.value);
+        }
+      }
       if (pacer) await pacer.wait();
       let r;
-      try { r = await request(`/api/v1/users/${pk}/info/`); } catch { return 'unknown'; }
-      if (r.status === 200 && r.json?.user) { pacer?.success(); return 'active'; }
-      if (r.status === 404) return 'gone';
-      const msg = (r.json && r.json.message) || '';
-      if (isThrottle(r, msg)) { pacer?.throttle(); if (state.prog) state.prog.throttles++; noteThrottle('scan'); await sleep(20000 * (attempt + 1)); continue; }
-      return 'unknown';
+      try {
+        const headers = { ...learned.headers };
+        if (learned.method === 'POST' && !headers['content-type']) headers['content-type'] = 'application/x-www-form-urlencoded';
+        const res = await fetch(url.href, { method: learned.method, headers, body: learned.method === 'POST' ? body : undefined, credentials: 'include' });
+        const text = await res.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        r = { status: res.status, json, text, url: res.url, redirected: res.redirected, ct: res.headers.get('content-type') || '' };
+      } catch (e) {
+        r = { status: 0, json: null, text: String(e), url: '', redirected: false, ct: '' };
+      }
+      if (!r.json) {
+        await keepSample(kind + '-learned', url.pathname, r);
+        return out.length ? out : null;
+      }
+      const users = extractUsers(r.json);
+      if (!users.length && !out.length) return null;
+      for (const u of users) {
+        if (!u.pk || seen.has(u.pk)) continue;
+        seen.add(u.pk);
+        out.push(u);
+      }
+      pages++;
+      if (state.prog) {
+        state.prog.pages++;
+        state.prog[kind === 'followers' ? 'fFound' : 'gFound'] = out.length;
+        if (strm) { strm.pages++; strm.found = out.length; strm.observed = Math.max(strm.observed || 0, users.length); }
+      }
+      await writeState({
+        ...progressFields(),
+        phase: kind,
+        message: `Copying how instagram.com loads your ${kind}: ${out.length}${expected ? ' of about ' + expected : ''}`,
+      });
+      const next = extractCursor(r.json);
+      if (!next || !users.length || (cursor && next.value === cursor.value)) break;
+      cursor = next;
+      if (pages > 400) break;
     }
-    return 'unknown';
+    return out;
   }
 
   // ---------- the scan ----------

@@ -60,6 +60,7 @@ Automated actions may be against Instagram's terms. Use the follow and unfollow 
 
 - **"You are not logged in"**: log in on instagram.com in this Chrome profile and scan again.
 - **"Instagram wants you to log in again"**: open the Instagram tab, complete whatever Instagram asks, then rescan.
+- **One list stays at 0 while the other works**: Instagram has stopped answering that endpoint for your session and is returning a web page instead of data. The scan retries in every request shape it knows (different page sizes, with and without the search_surface parameter, a second app id, and the i.instagram.com host). If all of those are refused, open that list on instagram.com, scroll it a little, and come back: the extension watches how the site itself loads the list and copies exactly that request, including the newer GraphQL one. Settings shows whether it has learned each list.
 - **A scan fails or one list stays at 0**: open Settings and click **Run diagnostics**. It asks Instagram for one page of each list in every shape the scan knows and shows exactly what came back, so you can see whether it is rate limiting, a login check, or one particular request shape being refused. The scan itself also tries the shapes in order and sticks with whichever answers.
 - **Unfollow or follow fails**: read the message. "Please wait a few minutes" means Instagram is rate limiting your session, usually because the profile loader or a scan made a lot of requests just before. The dashboard shows a red notice with the time it should clear, and the loader pauses itself. "feedback_required" is different: Instagram has temporarily blocked follow and unfollow actions on the account itself, which also happens when you do it by hand, and it usually lifts within a day.
 - **Scan errors mentioning a page size**: the scan asks Instagram for 200 accounts per request and steps down to 100, 50 or 25 on its own if Instagram refuses. If it keeps failing, lower "Largest page size" in Settings.
@@ -76,6 +77,7 @@ The extension talks only to instagram.com and Instagram's image CDN. All data li
 - `manifest.json`: extension config (Manifest V3).
 - `background.js`: opens the Instagram tab, kicks off scans, saves results, schedules automatic scans.
 - `content.js`: runs on instagram.com; fetches the lists and shows the profile pill.
+- `observer.js`: runs in the page itself and notes which requests instagram.com uses to load follower lists, so the scan can copy them if its own requests are refused. It records URLs, methods and Instagram's request headers only, never cookies or response contents, and only on instagram.com.
 - `dashboard.*`: the full page dashboard.
 - `popup.*`: the toolbar popup.
 - `lib/store.js`: storage layout and the logic that turns two scans into a list of changes.

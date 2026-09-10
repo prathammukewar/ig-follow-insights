@@ -4,13 +4,24 @@
   "version": "1.0.0",
   "description": "See who doesn't follow you back, track new followers and unfollowers over time, and tidy up who you follow. Everything stays on your computer.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "unlimitedStorage", "scripting", "tabs", "alarms", "notifications"],
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "scripting",
+    "tabs",
+    "alarms",
+    "notifications"
+  ],
   "host_permissions": [
     "https://www.instagram.com/*",
+    "https://i.instagram.com/*",
     "https://*.cdninstagram.com/*",
     "https://*.fbcdn.net/*"
   ],
-  "background": { "service_worker": "background.js", "type": "module" },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Follow Insights for Instagram",
@@ -27,12 +38,31 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "options_ui": { "page": "dashboard.html", "open_in_tab": true },
+  "options_ui": {
+    "page": "dashboard.html",
+    "open_in_tab": true
+  },
   "content_scripts": [
     {
-      "matches": ["https://www.instagram.com/*"],
-      "js": ["content.js"],
-      "css": ["content.css"],
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "observer.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ]

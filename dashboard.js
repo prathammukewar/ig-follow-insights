@@ -100,11 +100,12 @@ async function init() {
 }
 
 async function loadAll() {
-  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState, 'throttle']);
+  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState, 'throttle', 'learned']);
   S.accounts = g[KEYS.accounts] || {};
   S.scanState = g[KEYS.scanState] || null;
   S.bioState = g[KEYS.bioState] || null;
   S.throttle = g.throttle || null;
+  S.learned = g.learned || null;
   S.settings = await getSettings();
   const ids = Object.keys(S.accounts);
   S.uid = g[KEYS.active] && S.accounts[g[KEYS.active]] ? g[KEYS.active] : ids[0] || null;
@@ -1448,8 +1449,19 @@ function renderSettings() {
       <div class="field"><div><div class="lbl">Theme</div></div><select data-setting="theme">${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${s.theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     </div>
     <div class="card">
-      <h2>Diagnostics</h2>
-      <p class="muted small">If a scan keeps failing, this asks Instagram for one page of each list in every shape the scan knows, and shows exactly what came back. It makes six requests and takes about fifteen seconds. Nothing is saved or changed.</p>
+      <h2>When a scan will not work</h2>
+      <p class="muted small">Instagram sometimes stops answering one of its own list endpoints and returns a web page instead. When that happens the scan works through every request shape it knows, and then falls back to copying the request instagram.com itself makes.</p>
+      <div class="field" style="border:0;padding-top:4px">
+        <div>
+          <div class="lbl">Copying the website's own request</div>
+          <div class="desc">Open <a href="https://www.instagram.com/${esc(S.account?.username || '')}/followers/" target="_blank" rel="noopener">your followers list</a> and then your following list on instagram.com, scroll each one a little, and come back. The extension watches how the site loads them and reuses exactly that if its own requests are refused.</div>
+        </div>
+        <div>
+          <div>${S.learned?.followers ? '<span class="chip ok">Followers: learned</span>' : '<span class="chip gray">Followers: not learned yet</span>'}</div>
+          <div style="margin-top:4px">${S.learned?.following ? '<span class="chip ok">Following: learned</span>' : '<span class="chip gray">Following: not learned yet</span>'}</div>
+        </div>
+      </div>
+      <p class="muted small" style="margin-top:10px">Diagnostics asks Instagram for one page of each list in every shape, and shows exactly what came back. About ten requests over twenty seconds. Nothing is saved or changed on Instagram.</p>
       <button class="btn" data-act="diagnose" id="diagBtn">Run diagnostics</button>
       <div id="diagResult" style="margin-top:12px"></div>
     </div>
@@ -1683,21 +1695,26 @@ async function onMainClick(e) {
       if (!r?.ok) { if (out) out.innerHTML = `<div class="callout danger">${esc(r?.error || 'Could not run diagnostics')}</div>`; break; }
       const rows = r.rows.map((x) => `<tr>
         <td>${esc(x.label)}</td>
-        <td>${x.ok ? `<span class="chip ok">${fmtNum(x.users)} accounts</span>` : `<span class="chip danger">failed</span>`}</td>
-        <td>${x.status}</td>
+        <td>${x.ok ? `<span class="chip ok">${x.users == null ? 'ok' : fmtNum(x.users) + ' accounts'}</span>` : `<span class="chip danger">failed</span>`}</td>
+        <td>${x.status}${x.redirected ? ' <span class="chip gray">redirected</span>' : ''}</td>
         <td>${(x.ms / 1000).toFixed(1)}s</td>
         <td style="text-align:left">${esc(x.ok ? 'fine' : x.detail || '')}</td>
       </tr>`).join('');
-      const worked = r.rows.filter((x) => x.ok);
+      const sample = r.lastFailure?.samples?.followers || r.lastFailure?.samples?.following;
+      const worked = r.rows.filter((x) => x.ok && x.kind === 'followers');
       const failed = r.rows.filter((x) => !x.ok);
+      const listRows = r.rows.filter((x) => x.kind !== 'profile');
+      const profileOk = r.rows.some((x) => x.kind === 'profile' && x.ok);
       let verdict;
       if (!failed.length) verdict = '<div class="callout info">Every request worked. Whatever went wrong earlier has passed, so run a scan.</div>';
       else if (r.rows.some((x) => x.throttled)) verdict = '<div class="callout warn">Instagram is rate limiting your account right now. Wait 10 to 15 minutes and run this again.</div>';
       else if (r.rows.some((x) => x.fatal)) verdict = '<div class="callout danger">Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then try again.</div>';
-      else if (worked.length) verdict = `<div class="callout warn">Some shapes work and some do not. The scan now tries them in order and sticks with whichever answers, so a scan should get through. Working: ${esc(worked.map((x) => x.label).join('; '))}.</div>`;
-      else verdict = '<div class="callout danger">Instagram refused every shape. That is usually a temporary block on the account. Wait an hour, reload the Instagram tab, and try again.</div>';
+      else if (worked.length) verdict = `<div class="callout warn">Some shapes work and some do not. The scan tries them in order and sticks with whichever answers, so a scan should get through. Working: ${esc(worked.map((x) => x.label).join('; '))}.</div>`;
+      else if (profileOk) verdict = `<div class="callout danger">Your session is fine, since your profile loads, but Instagram will not return the followers list in any shape the extension knows. ${S.learned?.followers ? 'A copy of the website\'s own request has been learned, so the scan will use that instead. Try scanning.' : 'Open your followers list on instagram.com, scroll it a little, then come back and scan. The extension will copy the request the site itself makes.'}</div>`;
+      else verdict = '<div class="callout danger">Instagram refused everything, including your own profile. Reload the Instagram tab, make sure you are logged in, and try again in an hour.</div>';
       if (out) out.innerHTML = verdict + `<div class="table-wrap"><table class="hist"><thead><tr><th>Request</th><th>Result</th><th>Status</th><th>Time</th><th style="text-align:left">What Instagram sent</th></tr></thead><tbody>${rows}</tbody></table></div>
-        <button class="btn sm" style="margin-top:8px" data-act="copyDiag" data-text="${esc(JSON.stringify(r.rows))}">Copy details</button>`;
+        ${sample ? `<details style="margin-top:10px"><summary class="muted small">What Instagram actually sent back (first 600 characters)</summary><div class="log" style="margin-top:6px">${esc(sample.body || '')}</div><div class="muted small">${esc(sample.path)} → ${esc(sample.url || '')}${sample.redirected ? ' (redirected)' : ''} · ${esc(sample.ct || '')}</div></details>` : ''}
+        <button class="btn sm" style="margin-top:8px" data-act="copyDiag" data-text="${esc(JSON.stringify({ rows: r.rows, sample }))}">Copy details</button>`;
       break;
     }
     case 'copyDiag': { try { await navigator.clipboard.writeText(btn.dataset.text || ''); toast('Copied'); } catch { toast('Could not copy', 'error'); } break; }
