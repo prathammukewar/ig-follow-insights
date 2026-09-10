@@ -5,7 +5,7 @@ const app = document.getElementById('app');
 let state = null;
 
 async function load() {
-  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState]);
+  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState]);
   const accounts = g[KEYS.accounts] || {};
   const uid = g[KEYS.active] && accounts[g[KEYS.active]] ? g[KEYS.active] : Object.keys(accounts)[0] || null;
   const settings = await getSettings();
@@ -15,7 +15,7 @@ async function load() {
     snaps = d[KEYS.snapshots(uid)] || [];
     wl = d[KEYS.whitelist(uid)] || [];
   }
-  state = { uid, account: uid ? accounts[uid] : null, snaps, wl: new Set(wl), scanState: g[KEYS.scanState] || null, settings };
+  state = { uid, account: uid ? accounts[uid] : null, snaps, wl: new Set(wl), scanState: g[KEYS.scanState] || null, bioState: g[KEYS.bioState] || null, settings };
   const t = settings.theme;
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   render();
@@ -61,6 +61,11 @@ function render() {
     if (st?.status === 'error') html += `<div class="msg err">${esc(st.message)}</div>`;
     html += `<button class="btn primary" data-act="scan">${latest ? 'Scan again' : 'Scan now'}</button>`;
   }
+  const b = state.bioState;
+  if (b?.status === 'running' && Date.now() - (b.updatedAt || 0) < 120000) {
+    const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
+    html += `<div class="msg">Loading profiles: ${fmtNum(b.done)} of ${fmtNum(b.total)}${b.waiting ? ' (paused by Instagram)' : ''}</div><div class="progress"><div class="bar" style="width:${pct}%"></div></div>`;
+  }
   html += `<a class="btn" href="#" data-go="#/overview">Open dashboard</a>`;
   app.innerHTML = html;
 }
@@ -89,6 +94,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local') load();
 });
 
-setInterval(() => { if (state?.scanState?.status === 'running') render(); }, 1000);
+setInterval(() => { if (state?.scanState?.status === 'running' || state?.bioState?.status === 'running') render(); }, 1000);
 
 load();

@@ -1,37 +1,16 @@
-// Runs on instagram.com. Two jobs:
-//  1. Fetch the followers and following lists using the logged-in session when the
-//     background worker asks for a scan, and run single follow/unfollow actions.
-//  2. Show a small relationship pill on profile pages based on the last scan.
+// Runs on instagram.com. Jobs:
+//  1. Scan: fetch the followers and following lists using the logged-in session.
+//  2. Profiles: fetch bios and counts for many accounts in the background.
+//  3. One-off actions: follow, unfollow, approve or ignore requests, list someone else's followers.
+//  4. Show a small relationship pill on profile pages based on the last scan.
 (() => {
   if (window.__igfiLoaded) return;
   window.__igfiLoaded = true;
 
   const APP_ID = '936619743392459';
-  const state = { running: false, cancel: false, scan: {}, prog: null };
-
-  function newProgress(pageSize) {
-    return { pages: 0, waitedMs: 0, listStart: 0, fFound: 0, gFound: 0, expectedF: 0, expectedG: 0, pageSize: pageSize || 50 };
-  }
-
-  // Derived numbers the dashboard uses for the progress panel.
-  function progressFields() {
-    const p = state.prog;
-    if (!p) return {};
-    const now = Date.now();
-    const expectedTotal = (p.expectedF || 0) + (p.expectedG || 0);
-    const found = (p.fFound || 0) + (p.gFound || 0);
-    const active = p.listStart ? Math.max(0, now - p.listStart - p.waitedMs) : 0;
-    const avgPageMs = p.pages ? active / p.pages : 0;
-    const remaining = Math.max(0, expectedTotal - found);
-    const pagesRemaining = Math.ceil(remaining / p.pageSize);
-    const eta = avgPageMs && expectedTotal ? Math.round(pagesRemaining * avgPageMs) : null;
-    return {
-      pages: p.pages, waitedMs: p.waitedMs, fFound: p.fFound, gFound: p.gFound, expectedF: p.expectedF, expectedG: p.expectedG,
-      avgPageMs: Math.round(avgPageMs), eta, pageSize: p.pageSize, overallDone: found, overallTotal: expectedTotal,
-    };
-  }
+  const PAGE_SIZES = [200, 100, 50, 25];
+  const state = { running: false, scan: {}, prog: null, scanCtl: null, bio: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const jitter = (min, max) => min + Math.random() * Math.max(0, max - min);
 
   function cookie(name) {
     const m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[.$?*|{}()[\]\\/+^]/g, '\\$&') + '=([^;]*)'));
@@ -50,7 +29,7 @@
   }
 
   class ScanError extends Error {
-    constructor(msg, fatal) { super(msg); this.fatal = fatal; }
+    constructor(msg, fatal, status) { super(msg); this.fatal = fatal; this.status = status || 0; }
   }
 
   async function writeState(patch) {
@@ -68,28 +47,61 @@
     return { status: res.status, json, text };
   }
 
-  const RETRY_WAITS = [20000, 45000, 90000, 180000];
+  const mapUser = (u) => ({
+    pk: String(u.pk ?? u.pk_id ?? u.id ?? ''), u: u.username || '', n: u.full_name || '',
+    p: !!u.is_private, v: !!u.is_verified, pic: u.profile_pic_url || '',
+  });
 
-  async function getJson(path, { noRetry = false } = {}) {
+  // Shared pacing for everything that runs concurrently: keeps a minimum gap between
+  // request starts, speeds up after successes and backs off after throttling.
+  function makePacer(minMs, maxMs, startMs) {
+    const p = { min: Math.max(50, minMs || 250), max: Math.max(minMs || 250, maxMs || 5000), last: 0, chain: Promise.resolve(), throttled: 0 };
+    p.delay = Math.min(p.max, Math.max(p.min, startMs ?? p.min));
+    p.wait = () => {
+      const run = async () => {
+        const due = p.last + p.delay * (0.85 + Math.random() * 0.3);
+        const now = Date.now();
+        if (due > now) await sleep(due - now);
+        p.last = Date.now();
+      };
+      p.chain = p.chain.then(run, run);
+      return p.chain;
+    };
+    p.success = () => { p.delay = Math.max(p.min, p.delay * 0.85); };
+    p.throttle = () => { p.throttled++; p.delay = Math.min(p.max, Math.max(p.delay * 2, 1500)); };
+    return p;
+  }
+
+  const RETRY_WAITS = [20000, 45000, 90000, 180000];
+  const isThrottle = (r, msg) => r.status === 429 || /wait a few minutes|too many requests/i.test(msg);
+
+  // GET JSON with rate-limit handling.
+  //   probe: a 400 is thrown right away (used to find the largest page size Instagram accepts)
+  //   bestEffort: any failure is thrown right away (used for optional passes)
+  async function getJson(path, { probe = false, bestEffort = false, pacer = null, ctl = null } = {}) {
     for (let attempt = 0; ; attempt++) {
-      if (state.cancel) throw new ScanError('Scan cancelled.', true);
+      if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
+      if (pacer) await pacer.wait();
       let r;
       try { r = await request(path); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
-      if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) return r.json;
+      if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) { pacer?.success(); return r.json; }
       const msg = (r.json && (r.json.message || r.json.error_title)) || '';
-      if (noRetry) throw new ScanError(`Request failed (${r.status || 'network error'}${msg ? ': ' + msg : ''})`, false);
+      if (probe && r.status === 400) throw new ScanError('Page size rejected', false, 400);
+      if (bestEffort) throw new ScanError(`Request failed (${r.status || 'network error'}${msg ? ': ' + msg : ''})`, false, r.status);
       if (r.status === 401 || r.status === 403 || /login_required|checkpoint_required|challenge_required/i.test(msg)) {
-        throw new ScanError('Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then scan again.', true);
+        throw new ScanError('Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then scan again.', true, r.status);
       }
-      if (r.status === 404) throw new ScanError('Instagram returned 404 for ' + path + '. The endpoint may have changed.', true);
+      if (r.status === 404) throw new ScanError('Instagram returned 404 for ' + path + '. The endpoint may have changed.', true, 404);
       if (attempt >= RETRY_WAITS.length) {
-        throw new ScanError(`Instagram kept refusing requests (${r.status || 'network error'}${msg ? ': ' + msg : ''}). Wait 15 to 30 minutes and try again.`, true);
+        throw new ScanError(`Instagram kept refusing requests (${r.status || 'network error'}${msg ? ': ' + msg : ''}). Wait 15 to 30 minutes and try again.`, true, r.status);
       }
+      const throttled = isThrottle(r, msg);
+      if (throttled) pacer?.throttle();
       const wait = RETRY_WAITS[attempt];
-      const why = r.status === 429 || /wait a few minutes/i.test(msg) ? 'Instagram is rate limiting requests' : `Request failed (${r.status || 'network error'})`;
+      const why = throttled ? 'Instagram is rate limiting requests' : `Request failed (${r.status || 'network error'})`;
       const until = Date.now() + wait;
       while (Date.now() < until) {
-        if (state.cancel) throw new ScanError('Scan cancelled.', true);
+        if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
         await writeState({ ...progressFields(), message: `${why}. Retrying in ${Math.ceil((until - Date.now()) / 1000)}s`, waiting: true, retryAt: until, waitReason: why });
         const chunk = Math.min(3000, until - Date.now());
         await sleep(chunk);
@@ -99,42 +111,98 @@
     }
   }
 
-  async function fetchList(kind, uid, expected, settings, { order = null, bestEffort = false, into = null, label = null } = {}) {
+  // ---------- scan progress ----------
+
+  function newProgress(pageSize) {
+    return { pages: 0, waitedMs: 0, listStart: 0, fFound: 0, gFound: 0, expectedF: 0, expectedG: 0, pageSize: pageSize || 50, throttles: 0 };
+  }
+
+  function progressFields() {
+    const p = state.prog;
+    if (!p) return {};
+    const now = Date.now();
+    const expectedTotal = (p.expectedF || 0) + (p.expectedG || 0);
+    const found = (p.fFound || 0) + (p.gFound || 0);
+    const active = p.listStart ? Math.max(0, now - p.listStart - p.waitedMs) : 0;
+    const avgPageMs = p.pages ? active / p.pages : 0;
+    const remaining = Math.max(0, expectedTotal - found);
+    const pageSize = p.observed || p.pageSize;
+    const pagesRemaining = Math.ceil(remaining / pageSize);
+    const streams = p.parallel ? 2 : 1;
+    const eta = avgPageMs && expectedTotal ? Math.round((pagesRemaining * avgPageMs) / (p.parallel && p.fFound < p.expectedF && p.gFound < p.expectedG ? streams : 1)) : null;
+    return {
+      pages: p.pages, waitedMs: p.waitedMs, fFound: p.fFound, gFound: p.gFound, expectedF: p.expectedF, expectedG: p.expectedG,
+      avgPageMs: Math.round(avgPageMs), eta, pageSize, overallDone: found, overallTotal: expectedTotal, throttles: p.throttles,
+      parallel: !!p.parallel,
+    };
+  }
+
+  function listMessage(kind, out, expected, label) {
+    const p = state.prog;
+    if (label) return `${label}: ${out} more found so far`;
+    if (p?.parallel) return `Followers ${p.fFound}${p.expectedF ? ' of ' + p.expectedF : ''} · Following ${p.gFound}${p.expectedG ? ' of ' + p.expectedG : ''}`;
+    return `Fetching ${kind}: ${out}${expected ? ' of about ' + expected : ''}`;
+  }
+
+  // ---------- list fetching ----------
+
+  async function loadProbe() {
+    try { const { probe } = await chrome.storage.local.get('probe'); return probe || {}; } catch { return {}; }
+  }
+
+  async function fetchList(kind, uid, expected, settings, opts = {}) {
+    const { order = null, bestEffort = false, into = null, label = null, pacer = null, ctl = null } = opts;
     const out = into || [];
     const seen = new Set(out.map((u) => u.pk));
     const startCount = out.length;
+    const maxSize = Number(settings.pageSize) || 200;
+    const probe = await loadProbe();
+    const remembered = probe[kind]?.forMax === maxSize ? probe[kind].size : null;
+    const start = remembered || maxSize;
+    const sizes = [start, ...PAGE_SIZES.filter((s) => s < start)];
+    let sizeIdx = 0;
     let maxId = null;
     let emptyPages = 0;
     for (;;) {
-      const qs = new URLSearchParams({ count: String(settings.pageSize || 50) });
+      const count = sizes[sizeIdx];
+      const qs = new URLSearchParams({ count: String(count) });
       if (maxId) qs.set('max_id', maxId);
       if (order) qs.set('order', order);
       if (kind === 'followers') qs.set('search_surface', 'follow_list_page');
       let json;
       try {
-        json = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs}`, { noRetry: bestEffort });
+        json = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs}`, { probe: !maxId && sizeIdx < sizes.length - 1, bestEffort, pacer, ctl });
       } catch (e) {
-        if (bestEffort && !(e instanceof ScanError && e.fatal)) break;
+        if (e.status === 400 && !maxId && sizeIdx < sizes.length - 1) { sizeIdx++; continue; }
+        if (bestEffort && !e.fatal) break;
         throw e;
       }
       const users = Array.isArray(json.users) ? json.users : [];
+      if (!maxId && !order) {
+        const observed = users.length;
+        const size = Math.min(count, Math.max(observed, 1));
+        if (probe[kind]?.size !== size || probe[kind]?.forMax !== maxSize) {
+          probe[kind] = { size, forMax: maxSize, at: Date.now() };
+          try { await chrome.storage.local.set({ probe }); } catch {}
+        }
+        if (state.prog && observed > 0) state.prog.observed = Math.max(state.prog.observed || 0, observed);
+      }
       for (const u of users) {
-        const pk = String(u.pk ?? u.pk_id ?? u.id ?? '');
-        if (!pk || seen.has(pk)) continue;
-        seen.add(pk);
-        out.push({ pk, u: u.username || '', n: u.full_name || '', p: !!u.is_private, v: !!u.is_verified, pic: u.profile_pic_url || '' });
+        const m = mapUser(u);
+        if (!m.pk || seen.has(m.pk)) continue;
+        seen.add(m.pk);
+        out.push(m);
       }
       if (state.prog) {
         state.prog.pages++;
         state.prog[kind === 'followers' ? 'fFound' : 'gFound'] = out.length;
+        state.prog.throttles = pacer ? pacer.throttled : state.prog.throttles;
       }
       await writeState({
         ...progressFields(),
-        phase: kind,
+        phase: label ? kind : (state.prog?.parallel ? 'lists' : kind),
         deep: !!label,
-        message: label
-          ? `${label}: ${out.length - startCount} more found so far`
-          : `Fetching ${kind}: ${out.length}${expected ? ' of about ' + expected : ''}`,
+        message: listMessage(kind, label ? out.length - startCount : out.length, expected, label),
         done: out.length,
         total: expected || 0,
       });
@@ -142,21 +210,41 @@
       if (users.length === 0) emptyPages++; else emptyPages = 0;
       if (!next || next === maxId || emptyPages >= 2) break;
       maxId = String(next);
-      await sleep(jitter(settings.delayMin ?? 700, settings.delayMax ?? 1500));
     }
     return out;
   }
 
+  // Does this account still exist? Used to tell "unfollowed you" from "deactivated".
+  async function accountStatus(pk, pacer, ctl) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (ctl?.cancel) return 'unknown';
+      if (pacer) await pacer.wait();
+      let r;
+      try { r = await request(`/api/v1/users/${pk}/info/`); } catch { return 'unknown'; }
+      if (r.status === 200 && r.json?.user) { pacer?.success(); return 'active'; }
+      if (r.status === 404) return 'gone';
+      const msg = (r.json && r.json.message) || '';
+      if (isThrottle(r, msg)) { pacer?.throttle(); if (state.prog) state.prog.throttles++; await sleep(20000 * (attempt + 1)); continue; }
+      return 'unknown';
+    }
+    return 'unknown';
+  }
+
+  // ---------- the scan ----------
+
   async function runScan(settings) {
     if (state.running) return;
     state.running = true;
-    state.cancel = false;
+    const ctl = { cancel: false };
+    state.scanCtl = ctl;
     const started = Date.now();
     try {
       const { scanState } = await chrome.storage.local.get('scanState');
       state.scan = scanState || {};
     } catch { state.scan = {}; }
-    state.prog = newProgress(settings.pageSize);
+    state.prog = newProgress(Number(settings.pageSize) || 200);
+    state.prog.parallel = settings.parallelLists !== false;
+    const pacer = makePacer(settings.delayMin, settings.delayMax);
     try {
       const uid = cookie('ds_user_id');
       if (!uid) throw new ScanError('You are not logged in to Instagram in this browser. Log in, then scan again.', true);
@@ -164,7 +252,7 @@
 
       let me = null;
       try {
-        const j = await getJson(`/api/v1/users/${uid}/info/`);
+        const j = await getJson(`/api/v1/users/${uid}/info/`, { ctl });
         me = j.user || null;
       } catch (e) {
         if (e.fatal && /log in/i.test(e.message)) throw e;
@@ -174,14 +262,37 @@
       state.prog.expectedF = expectedF;
       state.prog.expectedG = expectedG;
       state.prog.listStart = Date.now();
-      await writeState({ ...progressFields(), phase: 'followers', message: `Starting on ${expectedF ? expectedF + ' ' : ''}followers`, username: me?.username || '' });
+      const base = { userId: uid, username: me?.username || '', fullName: me?.full_name || '', pic: me?.profile_pic_url || '', followerCount: expectedF, followingCount: expectedG, startedAt: started };
 
-      const followers = await fetchList('followers', uid, expectedF, settings);
-      const following = await fetchList('following', uid, expectedG, settings);
+      // Optional quick check: if Instagram's counters match the last scan exactly, reuse the last lists.
+      if (settings.quickCheck && me) {
+        let acct = null;
+        try { const { accounts } = await chrome.storage.local.get('accounts'); acct = accounts?.[uid] || null; } catch {}
+        if (acct && acct.fc === expectedF && acct.gc === expectedG && acct.lastScan && Date.now() - acct.lastScan < 30 * 86400000) {
+          await writeState({ ...progressFields(), phase: 'saving', eta: 0, message: 'Both counters match the last scan. Reusing the last lists (quick check is on in Settings).' });
+          const resp = await chrome.runtime.sendMessage({ type: 'scanResult', data: { ...base, reuse: true, followers: [], following: [], requests: state.prog.pages, finishedAt: Date.now() } });
+          if (!resp?.ok) throw new ScanError(resp?.error || 'Could not save the scan.', true);
+          badge.reload();
+          return;
+        }
+      }
+
+      await writeState({ ...progressFields(), phase: state.prog.parallel ? 'lists' : 'followers', message: state.prog.parallel ? 'Fetching followers and following together' : `Starting on ${expectedF ? expectedF + ' ' : ''}followers` });
+
+      let followers, following;
+      const runF = () => fetchList('followers', uid, expectedF, settings, { pacer, ctl });
+      const runG = () => fetchList('following', uid, expectedG, settings, { pacer, ctl });
+      if (state.prog.parallel) {
+        try {
+          [followers, following] = await Promise.all([runF(), runG()]);
+        } catch (e) { ctl.cancel = true; throw e; }
+      } else {
+        followers = await runF();
+        following = await runG();
+      }
 
       // Instagram's list endpoints sometimes skip entries (and always leave out deactivated accounts).
-      // When the list comes back short, fetch it again in a different order and merge anything new.
-      // If a previous double-check found nothing for a similar shortfall, skip it to save time.
+      // When a list comes back short, fetch it again in a different order and merge anything new.
       let prevDeep = null;
       try { const { accounts } = await chrome.storage.local.get('accounts'); prevDeep = accounts?.[uid]?.deep || null; } catch {}
       const deep = { ...(prevDeep || {}) };
@@ -192,27 +303,48 @@
         const skip = prevDeep && prevDeep[k + 'Found'] === 0 && short <= (prevDeep[k + 'Short'] || 0) + 5;
         if (skip) continue;
         const before = list.length;
+        state.prog.parallel = false;
         await writeState({ ...progressFields(), phase: kind, deep: true, eta: null, message: `Instagram counts ${expected} ${kind} but returned ${before}. Double-checking the list` });
-        await fetchList(kind, uid, expected, settings, { order: 'date_followed_earliest', bestEffort: true, into: list, label: `Double-checking ${kind}` });
+        await fetchList(kind, uid, expected, settings, { order: 'date_followed_earliest', bestEffort: true, into: list, label: `Double-checking ${kind}`, pacer, ctl });
         deep[k + 'Found'] = list.length - before;
         deep[k + 'Short'] = expected - list.length;
         deep.at = Date.now();
       }
 
+      // Who disappeared since the last scan? Check whether those accounts still exist.
+      let gone = null;
+      if (settings.verifyLost !== false) {
+        let prev = null;
+        try { const g = await chrome.storage.local.get(`snapshots_${uid}`); const snaps = g[`snapshots_${uid}`] || []; prev = snaps[snaps.length - 1] || null; } catch {}
+        if (prev) {
+          const curF = new Set(followers.map((u) => u.pk)), curG = new Set(following.map((u) => u.pk));
+          const lost = [...new Set([...prev.followers.filter((pk) => !curF.has(pk)), ...prev.following.filter((pk) => !curG.has(pk))])];
+          const check = lost.slice(0, Math.max(0, Number(settings.verifyCap) || 150));
+          if (check.length) {
+            gone = {};
+            for (let i = 0; i < check.length; i++) {
+              if (ctl.cancel) break;
+              await writeState({ ...progressFields(), phase: 'verify', deep: false, eta: null, message: `${check.length} account${check.length === 1 ? '' : 's'} disappeared since last scan. Checking whether they still exist: ${i + 1} of ${check.length}` });
+              gone[check[i]] = await accountStatus(check[i], pacer, ctl);
+              state.prog.pages++;
+            }
+          }
+        }
+      }
+
       await writeState({ ...progressFields(), phase: 'saving', deep: false, eta: 0, message: 'Saving results' });
       const data = {
-        requests: state.prog.pages,
-        waitedMs: state.prog.waitedMs,
-        userId: uid,
-        username: me?.username || '',
-        fullName: me?.full_name || '',
-        pic: me?.profile_pic_url || '',
+        ...base,
         followerCount: expectedF || followers.length,
         followingCount: expectedG || following.length,
         followers,
         following,
         deep: Object.keys(deep).length ? deep : null,
-        startedAt: started,
+        gone,
+        requests: state.prog.pages,
+        waitedMs: state.prog.waitedMs,
+        throttles: state.prog.throttles,
+        pageSize: state.prog.observed || state.prog.pageSize,
         finishedAt: Date.now(),
       };
       const resp = await chrome.runtime.sendMessage({ type: 'scanResult', data });
@@ -220,19 +352,28 @@
       badge.reload();
     } catch (e) {
       const msg = e instanceof ScanError ? e.message : 'Unexpected error: ' + (e?.message || e);
-      await writeState({ status: state.cancel ? 'cancelled' : 'error', message: msg, finishedAt: Date.now() });
+      await writeState({ status: ctl.cancel && /cancelled/i.test(msg) ? 'cancelled' : 'error', message: msg, finishedAt: Date.now() });
     } finally {
       state.running = false;
-      state.cancel = false;
+      state.scanCtl = null;
     }
   }
+
+  // ---------- single actions ----------
 
   async function doAction(action, pk) {
     if (!cookie('ds_user_id')) return { ok: false, error: 'Not logged in to Instagram.' };
     if (!/^\d+$/.test(String(pk))) return { ok: false, error: 'Bad user id.' };
     const paths = action === 'unfollow'
       ? [`/api/v1/web/friendships/${pk}/unfollow/`, `/api/v1/friendships/destroy/${pk}/`]
-      : [`/api/v1/web/friendships/${pk}/follow/`, `/api/v1/friendships/create/${pk}/`];
+      : action === 'follow'
+        ? [`/api/v1/web/friendships/${pk}/follow/`, `/api/v1/friendships/create/${pk}/`]
+        : action === 'approve'
+          ? [`/api/v1/web/friendships/${pk}/approve/`, `/api/v1/friendships/approve/${pk}/`]
+          : action === 'ignore'
+            ? [`/api/v1/web/friendships/${pk}/ignore/`, `/api/v1/friendships/ignore/${pk}/`]
+            : null;
+    if (!paths) return { ok: false, error: 'Unknown action.' };
     let last = null;
     for (const p of paths) {
       let r;
@@ -253,30 +394,135 @@
     return { ok: false, error: msg, status: last?.status || 0, blocked };
   }
 
+  function profileFields(u) {
+    return {
+      bio: u.biography || '', link: u.external_url || '', cat: u.category || '',
+      fc: u.follower_count ?? null, gc: u.following_count ?? null, mc: u.media_count ?? null,
+      p: !!u.is_private, v: !!u.is_verified, n: u.full_name || '', pic: u.profile_pic_url || '',
+    };
+  }
+
   async function getProfile(pk) {
     if (!cookie('ds_user_id')) return { ok: false, error: 'Not logged in to Instagram.' };
     if (!/^\d+$/.test(String(pk))) return { ok: false, error: 'Bad user id.' };
     let r;
     try { r = await request(`/api/v1/users/${pk}/info/`); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
-    if (r.status === 200 && r.json && r.json.user) {
-      const u = r.json.user;
-      return {
-        ok: true,
-        profile: {
-          bio: u.biography || '', link: u.external_url || '', cat: u.category || '',
-          fc: u.follower_count ?? null, gc: u.following_count ?? null, mc: u.media_count ?? null,
-          p: !!u.is_private, v: !!u.is_verified, n: u.full_name || '', pic: u.profile_pic_url || '',
-        },
-      };
-    }
+    if (r.status === 200 && r.json && r.json.user) return { ok: true, profile: profileFields(r.json.user) };
     const msg = (r.json && r.json.message) || `HTTP ${r.status || 'network error'}`;
-    return { ok: false, error: msg, blocked: r.status === 429 || /wait a few minutes/i.test(msg) };
+    return { ok: false, error: msg, status: r.status, blocked: isThrottle(r, msg) };
+  }
+
+  // ---------- background profile loader (bios and counts for many accounts) ----------
+
+  async function writeBio(patch) {
+    const b = state.bio;
+    if (!b) return;
+    const elapsed = Date.now() - b.startedAt - b.waitedMs;
+    const eta = b.done ? Math.round(((b.total - b.done) * elapsed) / b.done) : null;
+    b.state = { ...(b.state || {}), status: 'running', done: b.done, total: b.total, ok: b.ok, failed: b.failed, startedAt: b.startedAt, updatedAt: Date.now(), eta, waitedMs: b.waitedMs, userId: b.uid, ...patch };
+    try { await chrome.storage.local.set({ bioState: b.state }); } catch {}
+  }
+
+  async function runProfileJob(pks, settings) {
+    if (state.bio?.running) return { ok: false, error: 'A profile load is already running.' };
+    const uid = cookie('ds_user_id');
+    if (!uid) return { ok: false, error: 'Not logged in to Instagram.' };
+    const queue = pks.filter((pk) => /^\d+$/.test(String(pk)));
+    const b = { running: true, ctl: { cancel: false }, uid, done: 0, total: queue.length, ok: 0, failed: 0, startedAt: Date.now(), waitedMs: 0, throttles: 0, state: null };
+    state.bio = b;
+    const conc = Math.min(4, Math.max(1, Number(settings.bioConcurrency) || 2));
+    const pacer = makePacer(Number(settings.bioDelay) || 600, 20000);
+    let patches = {};
+    let paused = false;
+    const flush = async () => {
+      const keys = Object.keys(patches);
+      if (!keys.length) return;
+      const p = patches;
+      patches = {};
+      try { await chrome.runtime.sendMessage({ type: 'profilesBatch', userId: uid, patches: p }); } catch {}
+    };
+    await writeBio({ message: `Loading profiles: 0 of ${b.total}` });
+    const worker = async () => {
+      while (queue.length && !b.ctl.cancel) {
+        const pk = queue.shift();
+        await pacer.wait();
+        let r;
+        try { r = await getProfile(pk); } catch (e) { r = { ok: false, error: String(e), status: 0 }; }
+        if (r.ok) {
+          b.ok++;
+          patches[pk] = { ...r.profile, bioAt: Date.now(), bioErr: 0 };
+          pacer.success();
+        } else if (r.blocked) {
+          b.throttles++;
+          pacer.throttle();
+          queue.unshift(pk);
+          if (b.throttles > 6) { paused = true; b.ctl.cancel = true; break; }
+          const wait = [30000, 60000, 120000, 300000, 600000, 600000][Math.min(b.throttles - 1, 5)];
+          const until = Date.now() + wait;
+          await writeBio({ message: `Instagram is rate limiting profile requests. Waiting ${Math.round(wait / 1000)}s`, waiting: true, retryAt: until });
+          while (Date.now() < until && !b.ctl.cancel) { const c = Math.min(3000, until - Date.now()); await sleep(c); b.waitedMs += c; }
+          await writeBio({ waiting: false, retryAt: null, message: 'Retrying' });
+          continue;
+        } else {
+          b.failed++;
+          patches[pk] = { bioAt: Date.now(), bioErr: r.status || 1, ...(r.status === 404 ? { gone: Date.now() } : {}) };
+        }
+        b.done++;
+        if (Object.keys(patches).length >= 10) await flush();
+        if (b.done % 2 === 0 || b.done === b.total) await writeBio({ message: `Loading profiles: ${b.done} of ${b.total}` });
+      }
+    };
+    await Promise.all(Array.from({ length: conc }, worker));
+    await flush();
+    const status = paused ? 'paused' : b.ctl.cancel ? 'cancelled' : 'done';
+    b.state = { ...(b.state || {}), status, done: b.done, total: b.total, ok: b.ok, failed: b.failed, finishedAt: Date.now(), updatedAt: Date.now(), waiting: false, userId: uid,
+      message: paused ? `Paused after repeated rate limits. ${b.total - b.done} left. Resume in an hour or so.` : status === 'cancelled' ? `Stopped. ${b.done} of ${b.total} loaded.` : `Loaded ${b.ok} profile${b.ok === 1 ? '' : 's'}${b.failed ? `, ${b.failed} could not be loaded` : ''}.` };
+    try { await chrome.storage.local.set({ bioState: b.state }); } catch {}
+    state.bio = null;
+    return { ok: true };
+  }
+
+  // ---------- follow requests and other people's lists ----------
+
+  async function pendingRequests() {
+    try {
+      const j = await getJson('/api/v1/friendships/pending/', { bestEffort: true });
+      return { ok: true, users: (j.users || []).map(mapUser).filter((u) => u.pk) };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  async function listFor(pk, kind, max, settings) {
+    if (!/^\d+$/.test(String(pk))) return { ok: false, error: 'Bad user id.' };
+    const pacer = makePacer(Number(settings?.delayMin) || 250, 5000);
+    const out = [];
+    const seen = new Set();
+    let maxId = null;
+    let truncated = false;
+    try {
+      for (;;) {
+        const qs = new URLSearchParams({ count: '200' });
+        if (maxId) qs.set('max_id', maxId);
+        if (kind === 'followers') qs.set('search_surface', 'follow_list_page');
+        const j = await getJson(`/api/v1/friendships/${pk}/${kind}/?${qs}`, { bestEffort: true, pacer });
+        for (const u of j.users || []) { const m = mapUser(u); if (m.pk && !seen.has(m.pk)) { seen.add(m.pk); out.push(m); } }
+        const next = j.next_max_id;
+        if (!next || next === maxId || !(j.users || []).length) break;
+        if (out.length >= max) { truncated = true; break; }
+        maxId = String(next);
+      }
+    } catch (e) {
+      if (!out.length) return { ok: false, error: e.message, status: e.status };
+    }
+    return { ok: true, users: out, truncated };
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    const reply = (p) => p.then(sendResponse, (e) => sendResponse({ ok: false, error: e?.message || String(e) }));
     switch (msg?.type) {
       case 'ping':
-        sendResponse({ ok: true, loggedIn: !!cookie('ds_user_id'), userId: cookie('ds_user_id') });
+        sendResponse({ ok: true, loggedIn: !!cookie('ds_user_id'), userId: cookie('ds_user_id'), scanning: state.running, loadingProfiles: !!state.bio?.running });
         return;
       case 'runScan':
         if (state.running) { sendResponse({ ok: false, error: 'A scan is already running in this tab.' }); return; }
@@ -284,14 +530,29 @@
         sendResponse({ ok: true });
         return;
       case 'cancelScan':
-        state.cancel = true;
+        if (state.scanCtl) state.scanCtl.cancel = true;
         sendResponse({ ok: true });
         return;
       case 'action':
-        doAction(msg.action, msg.pk).then(sendResponse, (e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+        reply(doAction(msg.action, msg.pk));
         return true;
       case 'profile':
-        getProfile(msg.pk).then(sendResponse, (e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+        reply(getProfile(msg.pk));
+        return true;
+      case 'loadProfiles':
+        if (state.bio?.running) { sendResponse({ ok: false, error: 'A profile load is already running.' }); return; }
+        runProfileJob(msg.pks || [], msg.settings || {});
+        sendResponse({ ok: true, count: (msg.pks || []).length });
+        return;
+      case 'cancelProfiles':
+        if (state.bio) state.bio.ctl.cancel = true;
+        sendResponse({ ok: true });
+        return;
+      case 'pendingRequests':
+        reply(pendingRequests());
+        return true;
+      case 'listFor':
+        reply(listFor(msg.pk, msg.kind || 'followers', Number(msg.max) || 5000, msg.settings || {}));
         return true;
       default:
         return;

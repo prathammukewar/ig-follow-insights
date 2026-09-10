@@ -1,4 +1,4 @@
-import { KEYS, getSettings, saveScan } from './lib/store.js';
+import { KEYS, getSettings, saveScan, mergeUserFields } from './lib/store.js';
 
 const IG_HOME = 'https://www.instagram.com/';
 const STALE_MS = 3 * 60 * 1000;
@@ -33,7 +33,38 @@ async function handle(msg) {
     case 'scanResult': {
       const summary = await saveScan(msg.data);
       await finishScan(summary);
+      autoLoadProfiles(msg.data, sender).catch(() => {});
       return { ok: true, summary };
+    }
+    case 'profilesBatch': {
+      if (msg.userId && msg.patches) await mergeUserFields(String(msg.userId), msg.patches);
+      return { ok: true };
+    }
+    case 'loadProfiles': {
+      const settings = await getSettings();
+      const { tab } = await ensureIgTab({ create: true });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'loadProfiles', pks: msg.pks || [], settings });
+      return r || { ok: false, error: 'No answer from the Instagram tab' };
+    }
+    case 'cancelProfiles': {
+      const tab = await findIgTab();
+      if (tab) { try { await chrome.tabs.sendMessage(tab.id, { type: 'cancelProfiles' }); } catch {} }
+      const { bioState } = await chrome.storage.local.get(KEYS.bioState);
+      if (bioState?.status === 'running' && Date.now() - (bioState.updatedAt || 0) > 60000) {
+        await chrome.storage.local.set({ [KEYS.bioState]: { ...bioState, status: 'cancelled', message: 'Stopped.', updatedAt: Date.now() } });
+      }
+      return { ok: true };
+    }
+    case 'pendingRequests': {
+      const { tab } = await ensureIgTab({ create: true });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'pendingRequests' });
+      return r || { ok: false, error: 'No answer from the Instagram tab' };
+    }
+    case 'listFor': {
+      const settings = await getSettings();
+      const { tab } = await ensureIgTab({ create: true });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'listFor', pk: msg.pk, kind: msg.kind, max: msg.max, settings });
+      return r || { ok: false, error: 'No answer from the Instagram tab' };
     }
     case 'action': {
       const { tab } = await ensureIgTab({ create: true });
@@ -200,7 +231,7 @@ async function finishScan(summary) {
     const parts = [];
     if (summary.hasPrev) {
       parts.push(`${summary.newFollowers} new follower${summary.newFollowers === 1 ? '' : 's'}`);
-      parts.push(`${summary.lostFollowers} unfollowed you`);
+      parts.push(`${summary.lostFollowers} unfollowed you${summary.lostGone ? ` (${summary.lostGone} deactivated)` : ''}`);
     } else {
       parts.push(`${summary.f} followers, ${summary.g} following`);
     }
@@ -218,6 +249,22 @@ async function finishScan(summary) {
   if (scanState?.auto && scanState?.createdTab && scanState?.tabId) {
     try { await chrome.tabs.remove(scanState.tabId); } catch {}
   }
+}
+
+// After a manual scan, fetch bios and counts for accounts that don't have them yet.
+async function autoLoadProfiles(data, sender) {
+  const settings = await getSettings();
+  if (!settings.autoBios || !data?.userId) return;
+  const { scanState } = await chrome.storage.local.get(KEYS.scanState);
+  if (scanState?.auto) return;
+  const tabId = sender?.tab?.id;
+  if (!tabId) return;
+  const uid = String(data.userId);
+  const g = await chrome.storage.local.get(KEYS.users(uid));
+  const users = g[KEYS.users(uid)] || {};
+  const pks = [...new Set([...(data.followers || []), ...(data.following || [])].map((u) => u.pk))].filter((pk) => !users[pk]?.bioAt);
+  if (!pks.length) return;
+  try { await chrome.tabs.sendMessage(tabId, { type: 'loadProfiles', pks, settings }); } catch {}
 }
 
 chrome.notifications.onClicked.addListener((id) => {
