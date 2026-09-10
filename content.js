@@ -73,7 +73,21 @@
   }
 
   const RETRY_WAITS = [20000, 45000, 90000, 180000];
-  const isThrottle = (r, msg) => r.status === 429 || /wait a few minutes|too many requests/i.test(msg);
+  const isThrottle = (r, msg) => r.status === 429 || /wait a few minutes|too many requests|rate limit/i.test(msg);
+  const isActionBlock = (r, msg) => !!(r.json && r.json.feedback_required) || /feedback_required|spam|action blocked|blocked/i.test(msg);
+  const THROTTLE_MS = 10 * 60 * 1000;
+
+  // Instagram rate limits the whole session, not one endpoint. Remember it so the dashboard can
+  // warn, and stop the background profile loader so it does not keep the limit tripped.
+  async function noteThrottle(source) {
+    const until = Date.now() + THROTTLE_MS;
+    state.throttledUntil = until;
+    try { await chrome.storage.local.set({ throttle: { until, at: Date.now(), source } }); } catch {}
+    if (state.bio?.running && source !== 'profiles') {
+      state.bio.pausedByThrottle = true;
+      state.bio.ctl.cancel = true;
+    }
+  }
 
   // GET JSON with rate-limit handling.
   //   probe: a 400 is thrown right away (used to find the largest page size Instagram accepts)
@@ -96,7 +110,7 @@
         throw new ScanError(`Instagram kept refusing requests (${r.status || 'network error'}${msg ? ': ' + msg : ''}). Wait 15 to 30 minutes and try again.`, true, r.status);
       }
       const throttled = isThrottle(r, msg);
-      if (throttled) pacer?.throttle();
+      if (throttled) { pacer?.throttle(); noteThrottle('scan'); }
       const wait = RETRY_WAITS[attempt];
       const why = throttled ? 'Instagram is rate limiting requests' : `Request failed (${r.status || 'network error'})`;
       const until = Date.now() + wait;
@@ -224,7 +238,7 @@
       if (r.status === 200 && r.json?.user) { pacer?.success(); return 'active'; }
       if (r.status === 404) return 'gone';
       const msg = (r.json && r.json.message) || '';
-      if (isThrottle(r, msg)) { pacer?.throttle(); if (state.prog) state.prog.throttles++; await sleep(20000 * (attempt + 1)); continue; }
+      if (isThrottle(r, msg)) { pacer?.throttle(); if (state.prog) state.prog.throttles++; noteThrottle('scan'); await sleep(20000 * (attempt + 1)); continue; }
       return 'unknown';
     }
     return 'unknown';
@@ -390,8 +404,15 @@
       if (r.status === 429 || /wait a few minutes|feedback_required|spam|blocked/i.test(m)) break;
     }
     const msg = (last?.json && (last.json.feedback_message || last.json.message)) || `HTTP ${last?.status || 'network error'}`;
-    const blocked = last?.status === 429 || /feedback_required|spam|blocked|wait a few minutes/i.test(msg);
-    return { ok: false, error: msg, status: last?.status || 0, blocked };
+    const throttled = isThrottle(last || { status: 0 }, msg);
+    const actionBlock = !throttled && isActionBlock(last || {}, msg);
+    const loaderRunning = !!state.bio?.running;
+    if (throttled) await noteThrottle('action');
+    let human = `Instagram said: ${msg}`;
+    if (throttled) human = `Instagram is rate limiting requests from your account right now (${msg}). Wait 10 to 15 minutes and try again.${loaderRunning ? ' The profile loader has been paused so it stops adding to the load.' : ''}`;
+    else if (actionBlock) human = `Instagram has temporarily blocked follow and unfollow actions on your account (${msg}). This usually lifts within a day. Doing it by hand on instagram.com will show the same block.`;
+    else if (last?.status === 403 || /csrf|login_required/i.test(msg)) human = `Instagram rejected the request (${msg}). Reload the Instagram tab, make sure you are logged in, and try again.`;
+    return { ok: false, error: human, raw: msg, status: last?.status || 0, blocked: throttled || actionBlock, throttled, actionBlock };
   }
 
   function profileFields(u) {
@@ -409,7 +430,9 @@
     try { r = await request(`/api/v1/users/${pk}/info/`); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
     if (r.status === 200 && r.json && r.json.user) return { ok: true, profile: profileFields(r.json.user) };
     const msg = (r.json && r.json.message) || `HTTP ${r.status || 'network error'}`;
-    return { ok: false, error: msg, status: r.status, blocked: isThrottle(r, msg) };
+    const blocked = isThrottle(r, msg);
+    if (blocked) noteThrottle('profiles');
+    return { ok: false, error: msg, status: r.status, blocked };
   }
 
   // ---------- background profile loader (bios and counts for many accounts) ----------
@@ -427,6 +450,9 @@
     if (state.bio?.running) return { ok: false, error: 'A profile load is already running.' };
     const uid = cookie('ds_user_id');
     if (!uid) return { ok: false, error: 'Not logged in to Instagram.' };
+    if (state.throttledUntil && Date.now() < state.throttledUntil) {
+      return { ok: false, error: `Instagram is rate limiting requests right now. Try again in about ${Math.ceil((state.throttledUntil - Date.now()) / 60000)} minutes.` };
+    }
     const queue = pks.filter((pk) => /^\d+$/.test(String(pk)));
     const b = { running: true, ctl: { cancel: false }, uid, done: 0, total: queue.length, ok: 0, failed: 0, startedAt: Date.now(), waitedMs: 0, throttles: 0, state: null };
     state.bio = b;
@@ -456,8 +482,8 @@
           b.throttles++;
           pacer.throttle();
           queue.unshift(pk);
-          if (b.throttles > 6) { paused = true; b.ctl.cancel = true; break; }
-          const wait = [30000, 60000, 120000, 300000, 600000, 600000][Math.min(b.throttles - 1, 5)];
+          if (b.throttles > 2) { paused = true; b.pausedByThrottle = true; b.ctl.cancel = true; break; }
+          const wait = [45000, 90000][Math.min(b.throttles - 1, 1)];
           const until = Date.now() + wait;
           await writeBio({ message: `Instagram is rate limiting profile requests. Waiting ${Math.round(wait / 1000)}s`, waiting: true, retryAt: until });
           while (Date.now() < until && !b.ctl.cancel) { const c = Math.min(3000, until - Date.now()); await sleep(c); b.waitedMs += c; }
@@ -474,9 +500,10 @@
     };
     await Promise.all(Array.from({ length: conc }, worker));
     await flush();
-    const status = paused ? 'paused' : b.ctl.cancel ? 'cancelled' : 'done';
+    const pausedNow = paused || b.pausedByThrottle;
+    const status = pausedNow ? 'paused' : b.ctl.cancel ? 'cancelled' : 'done';
     b.state = { ...(b.state || {}), status, done: b.done, total: b.total, ok: b.ok, failed: b.failed, finishedAt: Date.now(), updatedAt: Date.now(), waiting: false, userId: uid,
-      message: paused ? `Paused after repeated rate limits. ${b.total - b.done} left. Resume in an hour or so.` : status === 'cancelled' ? `Stopped. ${b.done} of ${b.total} loaded.` : `Loaded ${b.ok} profile${b.ok === 1 ? '' : 's'}${b.failed ? `, ${b.failed} could not be loaded` : ''}.` };
+      message: pausedNow ? `Paused because Instagram is rate limiting requests. ${b.total - b.done} left. Resume in 15 minutes or so.` : status === 'cancelled' ? `Stopped. ${b.done} of ${b.total} loaded.` : `Loaded ${b.ok} profile${b.ok === 1 ? '' : 's'}${b.failed ? `, ${b.failed} could not be loaded` : ''}.` };
     try { await chrome.storage.local.set({ bioState: b.state }); } catch {}
     state.bio = null;
     return { ok: true };
@@ -541,6 +568,7 @@
         return true;
       case 'loadProfiles':
         if (state.bio?.running) { sendResponse({ ok: false, error: 'A profile load is already running.' }); return; }
+        if (state.throttledUntil && Date.now() < state.throttledUntil) { sendResponse({ ok: false, error: `Instagram is rate limiting requests right now. Try again in about ${Math.ceil((state.throttledUntil - Date.now()) / 60000)} minutes.` }); return; }
         runProfileJob(msg.pks || [], msg.settings || {});
         sendResponse({ ok: true, count: (msg.pks || []).length });
         return;

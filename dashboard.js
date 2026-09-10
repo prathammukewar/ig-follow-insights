@@ -100,10 +100,11 @@ async function init() {
 }
 
 async function loadAll() {
-  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState]);
+  const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState, 'throttle']);
   S.accounts = g[KEYS.accounts] || {};
   S.scanState = g[KEYS.scanState] || null;
   S.bioState = g[KEYS.bioState] || null;
+  S.throttle = g.throttle || null;
   S.settings = await getSettings();
   const ids = Object.keys(S.accounts);
   S.uid = g[KEYS.active] && S.accounts[g[KEYS.active]] ? g[KEYS.active] : ids[0] || null;
@@ -164,6 +165,10 @@ async function onStorageChange(changes, area) {
       }
     }
   }
+  if (changes.throttle) {
+    S.throttle = changes.throttle.newValue || null;
+    renderScanBanner();
+  }
   if (changes[KEYS.bioState]) {
     const prevStatus = S.bioState?.status;
     S.bioState = changes[KEYS.bioState].newValue || null;
@@ -171,7 +176,7 @@ async function onStorageChange(changes, area) {
     const st = S.bioState?.status;
     if (st !== prevStatus && (st === 'done' || st === 'paused' || st === 'cancelled') && S.bioState.message) toast(S.bioState.message, st === 'paused' ? 'warn' : '', 5000);
   }
-  const keys = Object.keys(changes).filter((k) => k !== KEYS.scanState && k !== KEYS.bioState);
+  const keys = Object.keys(changes).filter((k) => k !== KEYS.scanState && k !== KEYS.bioState && k !== 'throttle');
   if (!keys.length) return;
   if (Date.now() < S.ignoreUntil) return;
   const usersKey = S.uid ? KEYS.users(S.uid) : null;
@@ -374,11 +379,24 @@ function renderScanBox() {
     <div class="hint">Uses your logged-in Instagram tab. One opens in the background if needed.</div>`;
 }
 
+function throttleHTML() {
+  const t = S.throttle;
+  if (!t || !t.until || Date.now() > t.until || S.throttleDismissed === t.at) return '';
+  const until = new Date(t.until).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return `<div class="card scan-card err" style="margin-bottom:12px">
+    <div class="scan-head">
+      <div><h2 style="margin:0">Instagram is rate limiting your account</h2><div class="muted small">Too many requests in a short time (${esc(t.source === 'profiles' ? 'the profile loader' : t.source === 'action' ? 'a follow or unfollow' : 'a scan')} hit the limit at ${esc(fmtDateTime(t.at))}). Until about <b>${esc(until)}</b>, scans, profile loading and follow or unfollow actions may fail with "please wait a few minutes". Nothing is broken; it clears on its own. The profile loader has been paused.</div></div>
+      <button class="btn sm ghost" data-act="dismissThrottle">Dismiss</button>
+    </div>
+  </div>`;
+}
+
 function renderScanBanner() {
   const st = S.scanState;
-  if (!st || st.status === 'idle') { scanBanner.innerHTML = ''; return; }
+  const pre = throttleHTML();
+  if (!st || st.status === 'idle') { scanBanner.innerHTML = pre; return; }
   const key = st.finishedAt || st.startedAt;
-  if (S.bannerDismissed === key) { scanBanner.innerHTML = ''; return; }
+  if (S.bannerDismissed === key) { scanBanner.innerHTML = pre; return; }
   if (scanIsRunning(st)) {
     const steps = [['profile', 'Profile'], ['followers', 'Followers'], ['following', 'Following'], ['deep', 'Double-check'], ['verify', 'Check who left'], ['saving', 'Save']];
     const idx = st.phase === 'saving' ? 5 : st.phase === 'verify' ? 4 : st.deep ? 3 : st.phase === 'following' ? 2 : st.phase === 'followers' || st.phase === 'lists' ? 1 : 0;
@@ -395,7 +413,7 @@ function renderScanBanner() {
     const pct = st.overallTotal ? Math.min(100, Math.round((st.overallDone / st.overallTotal) * 100)) : 0;
     const elapsed = fmtDuration(Date.now() - (st.startedAt || Date.now()));
     const waitLeft = st.waiting && st.retryAt ? Math.max(0, Math.ceil((st.retryAt - Date.now()) / 1000)) : 0;
-    scanBanner.innerHTML = `<div class="card scan-card">
+    scanBanner.innerHTML = pre + `<div class="card scan-card">
       <div class="scan-head">
         <div><h2 style="margin:0">Scanning${st.username ? ' @' + esc(st.username) : ''}</h2><div class="muted small">Started ${esc(fmtDateTime(st.startedAt))}${st.auto ? ' · scheduled scan' : ''}${st.parallel ? ' · both lists at once' : ''}. Keep the Instagram tab open; it can stay in the background.</div></div>
         <button class="btn sm" data-act="cancelScan">Cancel scan</button>
@@ -419,7 +437,7 @@ function renderScanBanner() {
   if (st.status === 'done' && st.summary && st.finishedAt && Date.now() - st.finishedAt < 15 * 60 * 1000) {
     const s = st.summary;
     const snap = S.latest;
-    scanBanner.innerHTML = `<div class="card scan-card ok">
+    scanBanner.innerHTML = pre + `<div class="card scan-card ok">
       <div class="scan-head">
         <div><h2 style="margin:0">Scan finished${s.username ? ' for @' + esc(s.username) : ''}${s.quick ? ' (quick check)' : ''}</h2><div class="muted small">${esc(fmtDateTime(st.finishedAt))}${snap?.dur ? ' · took ' + fmtDuration(snap.dur) : ''}${snap?.req ? ' · ' + fmtNum(snap.req) + ' requests' : ''}${snap?.pageSize ? ' · ' + snap.pageSize + ' per page' : ''}${snap?.waited ? ' · ' + fmtDuration(snap.waited) + ' waiting on rate limits' : ''}</div></div>
         <button class="btn sm ghost" data-act="dismissBanner">Dismiss</button>
@@ -435,7 +453,7 @@ function renderScanBanner() {
     return;
   }
   if (st.status === 'error' || (st.status === 'running' && !scanIsRunning(st))) {
-    scanBanner.innerHTML = `<div class="card scan-card err">
+    scanBanner.innerHTML = pre + `<div class="card scan-card err">
       <div class="scan-head">
         <div><h2 style="margin:0">Scan ${st.status === 'error' ? 'failed' : 'stopped responding'}</h2><div class="muted small">${esc(st.message || 'The Instagram tab may have been closed.')}</div></div>
         <div class="actions"><button class="btn sm ghost" data-act="dismissBanner">Dismiss</button><button class="btn sm primary" data-act="scan">Scan again</button></div>
@@ -443,7 +461,7 @@ function renderScanBanner() {
     </div>`;
     return;
   }
-  scanBanner.innerHTML = '';
+  scanBanner.innerHTML = pre;
 }
 
 function renderMain() {
@@ -1371,7 +1389,7 @@ function renderSettings() {
     <div class="card">
       <h2>Bios and follower counts</h2>
       ${chk('autoBios', 'Load profiles automatically after each scan', 'Fetches bio and counts for accounts that do not have them yet, in the background, after a manual scan finishes.')}
-      ${num('bioConcurrency', 'Profile requests at once', 'Two is a good balance. Four is faster but Instagram pushes back sooner.', 'min="1" max="4"')}
+      ${num('bioConcurrency', 'Profile requests at once', 'One is safe. Two is faster but on accounts with a few thousand people it trips Instagram\'s rate limit, which then also blocks unfollows for a few minutes.', 'min="1" max="4"')}
       ${num('bioDelay', 'Pause between profile requests (ms)', '', 'min="200" max="10000" step="50"')}
     </div>
     <div class="card">
@@ -1483,6 +1501,7 @@ async function onMainClick(e) {
     case 'cancelScan': await sendBg({ type: 'cancelScan' }); break;
     case 'resetScan': await sendBg({ type: 'resetScan' }); break;
     case 'dismissBanner': S.bannerDismissed = S.scanState?.finishedAt || S.scanState?.startedAt; renderScanBanner(); break;
+    case 'dismissThrottle': S.throttleDismissed = S.throttle?.at; renderScanBanner(); break;
     case 'more': S.limit += PAGE; S.route === 'changes' ? renderChanges() : renderListBody(S.route === 'groups' ? 'tag' : S.route); break;
     case 'logMore': S.logLimit += 150; renderMain(); break;
     case 'logFilter': S.logFilter = btn.dataset.k; renderMain(); break;
@@ -1790,7 +1809,8 @@ async function singleAction(action, pk) {
   const name = S.users[pk]?.u || pk;
   const r = await sendBg({ type: 'action', action, pk });
   if (!r?.ok) {
-    toast(`Could not ${action} @${name}: ${r?.error || 'unknown error'}`, 'error', 6000);
+    toast(`Could not ${action} @${name}. ${r?.error || 'Unknown error'}`, 'error', r?.blocked ? 12000 : 7000);
+    if (r?.throttled || r?.actionBlock) renderScanBanner();
     return false;
   }
   await applyAndPatch(action, pk);
@@ -1873,7 +1893,9 @@ async function runBatch(action, pks) {
         failed++;
         log.insertAdjacentHTML('afterbegin', `<div class="bad">@${esc(name)}: ${esc(r?.error || 'failed')}</div>`);
         if (r?.blocked) {
-          status.textContent = 'Instagram pushed back. Stopped to protect your account. Wait a few hours before trying again.';
+          status.textContent = r.throttled
+            ? 'Instagram is rate limiting requests. Stopped. Wait 10 to 15 minutes before trying again.'
+            : 'Instagram has temporarily blocked follow and unfollow actions on your account. Stopped. This usually lifts within a day.';
           break;
         }
       }

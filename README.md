@@ -50,7 +50,7 @@ Scan again whenever you like. Every scan is compared with the previous one, so f
 
 The scan uses the same requests Instagram's own website makes when you open your followers list, spaced out with random pauses. That has been fine in practice, but Instagram does rate limit. If you see "Instagram is rate limiting requests" the scan waits and retries on its own. If it gives up, wait 15 to 30 minutes.
 
-Loading bios means one request per profile. The background loader runs two at a time with a short pause, roughly 150 profiles a minute, and waits it out when Instagram rate limits. A few thousand accounts take twenty minutes or so the first time; after that only new accounts need loading. Bios are cached, so you only pay once per person. Keep the Instagram tab open while it runs (it can be in the background).
+Loading bios means one request per profile. The background loader runs one at a time with a one second pause, roughly 50 profiles a minute, and pauses itself if Instagram rate limits. A few thousand accounts take about an hour the first time; after that only new accounts need loading. Running it faster (Settings) works on small accounts but trips Instagram's limit on big ones, and that limit also blocks unfollows for a few minutes. Bios are cached, so you only pay once per person. Keep the Instagram tab open while it runs (it can be in the background).
 
 Following and unfollowing is a different matter. Instagram blocks accounts that do too many of these in a short time, sometimes for a day or more. The defaults (one action every 12 seconds, at most 25 per batch) are conservative. Keep it that way, especially on a newer account. A batch stops the moment Instagram pushes back.
 
@@ -60,6 +60,7 @@ Automated actions may be against Instagram's terms. Use the follow and unfollow 
 
 - **"You are not logged in"**: log in on instagram.com in this Chrome profile and scan again.
 - **"Instagram wants you to log in again"**: open the Instagram tab, complete whatever Instagram asks, then rescan.
+- **Unfollow or follow fails**: read the message. "Please wait a few minutes" means Instagram is rate limiting your session, usually because the profile loader or a scan made a lot of requests just before. The dashboard shows a red notice with the time it should clear, and the loader pauses itself. "feedback_required" is different: Instagram has temporarily blocked follow and unfollow actions on the account itself, which also happens when you do it by hand, and it usually lifts within a day.
 - **Scan errors mentioning a page size**: the scan asks Instagram for 200 accounts per request and steps down to 100, 50 or 25 on its own if Instagram refuses. If it keeps failing, lower "Largest page size" in Settings.
 - **Scan seems stuck**: the Instagram tab was probably closed or put to sleep. Click Reset in the sidebar and scan again. Keeping the Instagram tab open (it can be in the background) is enough.
 - **Avatars show initials**: profile picture links from Instagram expire after a while. They refresh on the next scan.
