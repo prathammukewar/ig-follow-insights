@@ -179,7 +179,10 @@
     const out = into || [];
     const seen = new Set(out.map((u) => u.pk));
     const startCount = out.length;
-    const maxSize = Number(settings.pageSize) || 200;
+    // Followers pages are slow at large sizes, so they get their own cap (50 by default).
+    const maxSize = kind === 'followers'
+      ? Math.min(Number(settings.pageSize) || 200, Number(settings.followersPageSize) || 50)
+      : Number(settings.pageSize) || 200;
     const probe = await loadProbe();
     const remembered = probe[kind]?.forMax === maxSize ? probe[kind].size : null;
     const start = remembered || maxSize;

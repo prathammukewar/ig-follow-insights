@@ -1416,7 +1416,8 @@ function renderSettings() {
         <select data-setting="autoScanHours">${[[0, 'Off'], [6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every day'], [72, 'Every 3 days'], [168, 'Every week']].map(([v, l]) => `<option value="${v}" ${Number(s.autoScanHours) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       ${chk('notify', 'Notify me when a scan finishes', 'A system notification with the number of new and lost followers.')}
       ${chk('parallelLists', 'Fetch followers and following at the same time', 'About twice as fast. Turn off if Instagram keeps pushing back.')}
-      ${num('pageSize', 'Largest page size to ask for', 'The scan tries this first and steps down to 100, 50 or 25 if Instagram refuses. Bigger pages mean fewer requests.', 'min="25" max="200" step="25"')}
+      ${num('pageSize', 'Following: accounts per request', 'The scan tries this first and steps down to 100, 50 or 25 if Instagram refuses.', 'min="25" max="200" step="25"')}
+      ${num('followersPageSize', 'Followers: accounts per request', 'Instagram answers followers requests slowly at big sizes, so 50 is usually fastest overall.', 'min="25" max="200" step="25"')}
       ${num('delayMin', 'Starting pause between requests (ms)', 'The scan starts here and speeds up a little after each success, then backs off toward the maximum when Instagram pushes back.', 'min="100" max="10000" step="50"')}
       ${num('delayMax', 'Maximum pause when throttled (ms)', '', 'min="500" max="30000" step="100"')}
       ${chk('quickCheck', 'Quick check: skip the full pull when both counters match', "If Instagram's follower and following counters are exactly what they were at the last scan, reuse the last lists instead of fetching. Fast, but one new follower plus one unfollower nets to zero and would be missed.")}
