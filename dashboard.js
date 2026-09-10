@@ -246,7 +246,8 @@ function baseList(kind) {
     case 'nfb': return S.filters.showWl ? [...S.lists.nfb] : nfbList();
     case 'waiting': {
       const min = Math.max(0, Number(S.settings.waitDays) || 0);
-      return nfbList().filter((pk) => waitDays(pk) >= min);
+      const includeUnknown = S.settings.waitUnknown !== false;
+      return nfbList().filter((pk) => waitDays(pk) >= min || (includeUnknown && !waitExact(pk)));
     }
     case 'fans': return [...S.lists.fans];
     case 'mutual': return [...S.lists.mutual];
@@ -346,8 +347,10 @@ function etaText(st) {
   if (st.deep) return 'a little longer';
   if (st.waiting) return 'paused';
   if (st.eta == null) return 'estimating';
-  const left = st.eta - (Date.now() - (st.updatedAt || Date.now()));
-  if (left <= 1500) return 'almost done';
+  const since = Date.now() - (st.updatedAt || Date.now());
+  const left = st.eta - since;
+  if (since > 20000 && left < 10000) return 'a bit longer than expected';
+  if (left < 10000) return 'under 10s';
   return '~' + fmtDuration(left);
 }
 
@@ -425,7 +428,7 @@ function renderScanBanner() {
         <div><div class="v">${esc(etaText(st))}</div><div class="l">Time remaining</div></div>
         <div><div class="v">${esc(elapsed)}</div><div class="l">Elapsed</div></div>
         <div><div class="v">${fmtNum(st.pages || 0)}</div><div class="l">Requests to Instagram</div></div>
-        <div><div class="v">${st.avgPageMs ? (st.avgPageMs / 1000).toFixed(1) + 's' : '–'}</div><div class="l">Per request (${st.pageSize || 50} accounts each)</div></div>
+        <div><div class="v">${st.avgPageMs ? (st.avgPageMs / 1000).toFixed(1) + 's' : '–'}</div><div class="l">Per request${st.pageSizeF || st.pageSizeG ? ` (${st.pageSizeF || '?'} followers / ${st.pageSizeG || '?'} following per page)` : ''}</div></div>
         <div><div class="v">${st.throttles || 0}</div><div class="l">Times Instagram pushed back</div></div>
         <div><div class="v">${fmtNum((st.fFound || 0) + (st.gFound || 0))}</div><div class="l">Accounts fetched so far</div></div>
       </div>
@@ -439,7 +442,7 @@ function renderScanBanner() {
     const snap = S.latest;
     scanBanner.innerHTML = pre + `<div class="card scan-card ok">
       <div class="scan-head">
-        <div><h2 style="margin:0">Scan finished${s.username ? ' for @' + esc(s.username) : ''}${s.quick ? ' (quick check)' : ''}</h2><div class="muted small">${esc(fmtDateTime(st.finishedAt))}${snap?.dur ? ' · took ' + fmtDuration(snap.dur) : ''}${snap?.req ? ' · ' + fmtNum(snap.req) + ' requests' : ''}${snap?.pageSize ? ' · ' + snap.pageSize + ' per page' : ''}${snap?.waited ? ' · ' + fmtDuration(snap.waited) + ' waiting on rate limits' : ''}</div></div>
+        <div><h2 style="margin:0">Scan finished${s.username ? ' for @' + esc(s.username) : ''}${s.quick ? ' (quick check)' : ''}</h2><div class="muted small">${esc(fmtDateTime(st.finishedAt))}${snap?.dur ? ' · took ' + fmtDuration(snap.dur) : ''}${snap?.req ? ' · ' + fmtNum(snap.req) + ' requests' : ''}${snap?.pageSizes ? ` · ${snap.pageSizes.f || '?'} followers / ${snap.pageSizes.g || '?'} following per page` : snap?.pageSize ? ' · ' + snap.pageSize + ' per page' : ''}${snap?.waited ? ' · ' + fmtDuration(snap.waited) + ' waiting on rate limits' : ''}</div></div>
         <button class="btn sm ghost" data-act="dismissBanner">Dismiss</button>
       </div>
       <div class="scan-stats">
@@ -683,7 +686,7 @@ function renderListView(kind) {
   const tags = Object.keys(allTags()).sort();
   main.innerHTML = `
     <header class="page-head">
-      <div><h1>${esc(meta.title)}</h1><p class="sub">${esc(meta.sub)}</p></div>
+      <div><h1>${esc(meta.title)}</h1><p class="sub">${esc(meta.sub)}</p>${relLegendHTML()}</div>
       ${kind === 'tag' ? `<div class="actions"><a class="btn sm" href="#/groups">All groups</a></div>` : ''}
     </header>
     ${kind === 'whitelist' ? whitelistTopHTML() : ''}
@@ -712,9 +715,11 @@ function renderListView(kind) {
 
 function waitingIntroHTML() {
   const exact = S.account?.exportImport;
+  const unknown = nfbList().filter((pk) => !waitExact(pk)).length;
   return `<div class="card info" style="padding:12px 16px">
-    ${exact ? `Follow dates come from your Instagram data export (imported ${esc(fmtDate(exact.at))}), so the waits are exact.` : `Follow dates are only known from the first scan onward, so "at least N days" means they were already followed when you first scanned. Import your Instagram data export in Settings to get exact dates.`}
-    Change the threshold in Settings (currently ${S.settings.waitDays} days).
+    ${exact ? `Follow dates come from your Instagram data export (imported ${esc(fmtDate(exact.at))}), so the waits are exact.` : `The extension only knows follow dates from your first scan (${esc(fmtDate(firstScanTs()))}) onward. ${fmtNum(unknown)} of the people who don't follow you back were already followed before that, so their real wait is longer than shown. Import your Instagram data export in Settings to get exact dates.`}
+    Threshold: ${S.settings.waitDays} days (change it in Settings).
+    ${unknown ? `<label class="chk-inline" style="margin-left:8px"><input type="checkbox" data-setting="waitUnknown" ${S.settings.waitUnknown !== false ? 'checked' : ''}> Include people followed before the first scan</label>` : ''}
   </div>`;
 }
 
@@ -802,20 +807,48 @@ function tagChipsHTML(pk) {
   return chips || note ? `<div class="line-tags">${chips}${note}</div>` : '';
 }
 
+// One consistent, color-coded relationship label used everywhere.
+function relOf(pk) {
+  const isF = S.lists.followers.has(pk), isG = S.lists.following.has(pk);
+  if (isF && isG) return 'mutual';
+  if (isG) return 'nfb';
+  if (isF) return 'fan';
+  return 'none';
+}
+
+const REL = {
+  mutual: { cls: 'ok', label: 'Mutual', title: 'You follow each other' },
+  nfb: { cls: 'danger', label: 'Not following you back', title: 'You follow them, they do not follow you' },
+  fan: { cls: 'info', label: 'Follows you', title: 'They follow you, you do not follow them' },
+  none: { cls: 'gray', label: 'Not connected', title: 'Neither of you follows the other' },
+};
+
+function relChip(pk, extraCls = '') {
+  const u = S.users[pk] || {};
+  const r = relOf(pk);
+  if (r === 'none' && u.gone) return `<span class="chip gray rel ${extraCls}" title="Deactivated, deleted, suspended, or they blocked you">Account gone</span>`;
+  const d = REL[r];
+  return `<span class="chip ${d.cls} rel ${extraCls}" title="${d.title}">${d.label}</span>`;
+}
+
+function relLegendHTML() {
+  return `<div class="rel-legend">${['mutual', 'fan', 'nfb', 'none'].map((k) => `<span><i class="dot ${REL[k].cls}"></i>${REL[k].label}</span>`).join('')}</div>`;
+}
+
 function rowHTML(pk, opts = {}) {
   const u = S.users[pk] || { u: String(pk), n: '' };
   const isF = S.lists.followers.has(pk), isG = S.lists.following.has(pk);
   const wl = S.wl.has(pk);
   const chips = [];
-  if (isF) chips.push('<span class="chip ok">Follows you</span>');
-  if (isG) chips.push('<span class="chip info">You follow</span>');
-  if (!isF && !isG && !opts.request) chips.push(u.gone ? '<span class="chip gray">Account gone</span>' : '<span class="chip gray">Not connected</span>');
   if (opts.request) chips.push('<span class="chip warn">Wants to follow you</span>');
-  if (opts.why === 'gone') chips.push('<span class="chip gray" title="Deactivated, deleted, suspended, or they blocked you">Account gone</span>');
-  else if (opts.why === 'active') chips.push('<span class="chip danger">Really unfollowed</span>');
+  if (!opts.request || isG) chips.push(relChip(pk));
+  if (opts.why === 'gone' && !u.gone) chips.push('<span class="chip gray" title="Deactivated, deleted, suspended, or they blocked you">Account gone</span>');
+  else if (opts.why === 'active') chips.push('<span class="chip warn">Really unfollowed you</span>');
   if (S.route === 'waiting' || opts.wait) {
     const d = waitDays(pk);
-    chips.push(`<span class="chip warn" title="Since you followed them">${waitExact(pk) ? '' : 'At least '}${d} day${d === 1 ? '' : 's'} waiting</span>`);
+    chips.push(waitExact(pk)
+      ? `<span class="chip warn" title="Since you followed them">${d} day${d === 1 ? '' : 's'} waiting</span>`
+      : `<span class="chip warn" title="They were already followed at your first scan, so the real wait is longer">Followed before first scan · ${d}+ day${d === 1 ? '' : 's'}</span>`);
   }
   const acts = opts.wlAdd
     ? `<button class="btn sm primary" data-act="wl">Add to whitelist</button>`
@@ -971,7 +1004,7 @@ function wlAutocomplete(raw) {
   S.wlMatches = top.map((x) => x[1]);
   S.wlHi = top.length ? 0 : -1;
   box.innerHTML = top.length
-    ? top.map(([, pk, u], i) => `<div class="item ${i === 0 ? 'active' : ''}" data-pk="${esc(pk)}">${avatarHTML(u, 'sm')}<div class="grow"><div><b>${esc(u.u || pk)}</b>${u.v ? ' <span class="vbadge">✓</span>' : ''} ${S.lists.followers.has(pk) ? '<span class="chip ok">Follows you</span>' : '<span class="chip danger">Not following you</span>'}</div>${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>${u.fc != null ? `<span class="chip gray">${fmtCount(u.fc)} followers</span>` : ''}</div>`).join('')
+    ? top.map(([, pk, u], i) => `<div class="item ${i === 0 ? 'active' : ''}" data-pk="${esc(pk)}">${avatarHTML(u, 'sm')}<div class="grow"><div><b>${esc(u.u || pk)}</b>${u.v ? ' <span class="vbadge">✓</span>' : ''} ${relChip(pk)}</div>${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>${u.fc != null ? `<span class="chip gray">${fmtCount(u.fc)} followers</span>` : ''}</div>`).join('')
     : `<div class="item none">No one you follow matches "${esc(q)}"</div>`;
   box.hidden = false;
 }
@@ -1035,7 +1068,13 @@ function renderGroups() {
     </div>
     <div class="card">
       <h2>Your groups</h2>
-      ${names.length ? names.map((t) => `<div class="acct-row" data-tag="${esc(t)}"><span class="chip tag">${esc(t)}</span><div class="grow muted small">${fmtNum(tags[t])} account${tags[t] === 1 ? '' : 's'}</div><a class="btn sm" href="#/groups?tag=${encodeURIComponent(t)}">View</a><button class="btn sm ghost" data-act="renameTag">Rename</button><button class="btn sm ghost danger" data-act="deleteTag">Delete</button></div>`).join('') : `<div class="empty small">No groups yet. Use "Groups and note" in any row's ⋯ menu, select rows and click "Tag selected", or create one from bio keywords above.</div>`}
+      ${names.length ? relLegendHTML() + names.map((t) => {
+        const members = Object.keys(S.tags).filter((pk) => (S.tags[pk].t || []).includes(t));
+        const c = { mutual: 0, fan: 0, nfb: 0, none: 0 };
+        for (const pk of members) c[relOf(pk)]++;
+        const parts = ['mutual', 'fan', 'nfb', 'none'].filter((k) => c[k]).map((k) => `<span class="chip ${REL[k].cls} rel" title="${REL[k].title}">${fmtNum(c[k])} ${REL[k].label.toLowerCase()}</span>`).join('');
+        return `<div class="acct-row" data-tag="${esc(t)}"><span class="chip tag">${esc(t)}</span><div class="grow"><div class="muted small">${fmtNum(tags[t])} account${tags[t] === 1 ? '' : 's'}</div><div class="line3" style="margin-top:3px">${parts}</div></div><a class="btn sm" href="#/groups?tag=${encodeURIComponent(t)}">View</a><button class="btn sm ghost" data-act="renameTag">Rename</button><button class="btn sm ghost danger" data-act="deleteTag">Delete</button></div>`;
+      }).join('') : `<div class="empty small">No groups yet. Use "Groups and note" in any row's ⋯ menu, select rows and click "Tag selected", or create one from bio keywords above.</div>`}
     </div>`;
 }
 
@@ -1144,7 +1183,7 @@ async function showMutuals(pk) {
   const followMe = [...S.lists.followers].filter((p) => set.has(p));
   const iFollow = [...S.lists.following].filter((p) => set.has(p) && !S.lists.followers.has(p));
   status.innerHTML = `Checked <b>${fmtNum(theirs.length)}</b> of their followers${r.truncated ? ' (capped)' : ''}. <b>${fmtNum(followMe.length)}</b> also follow you and <b>${fmtNum(iFollow.length)}</b> more are people you follow.`;
-  const rowOf = (p) => { const x = S.users[p] || {}; return `<div class="log-row">${avatarHTML(x, 'sm')}<div style="min-width:0"><a class="uname" href="${profileUrl(x.u)}" target="_blank" rel="noopener">${esc(x.u || p)}</a>${x.n ? `<div class="line2">${esc(x.n)}</div>` : ''}</div><div class="t">${S.lists.followers.has(p) ? 'Follows you' : 'You follow'}</div></div>`; };
+  const rowOf = (p) => { const x = S.users[p] || {}; return `<div class="log-row">${avatarHTML(x, 'sm')}<div style="min-width:0"><a class="uname" href="${profileUrl(x.u)}" target="_blank" rel="noopener">${esc(x.u || p)}</a>${x.n ? `<div class="line2">${esc(x.n)}</div>` : ''}</div><div class="t">${relChip(p)}</div></div>`; };
   const all = [...followMe, ...iFollow];
   m.querySelector('#mtBody').innerHTML = all.length
     ? `<div class="log" style="max-height:340px">${all.slice(0, 200).map(rowOf).join('')}${all.length > 200 ? `<div class="muted small">and ${fmtNum(all.length - 200)} more</div>` : ''}</div>
@@ -1241,7 +1280,7 @@ function activityLogHTML(events, grouped) {
     const why = e.why === 'gone' ? ' <span class="chip gray">account gone</span>' : e.why === 'active' && e.k === 'lost_follower' ? ' <span class="chip danger">really unfollowed</span>' : '';
     return `<div class="log-row">
       ${avatarHTML(u, 'sm')}
-      <div style="min-width:0"><a class="uname" href="${profileUrl(u.u)}" target="_blank" rel="noopener">${esc(u.u)}</a> <span class="muted">${esc(EVENT_LABELS[e.k] || e.k)}${e.src === 'you' ? ' (from this extension)' : ''}</span>${why}${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>
+      <div style="min-width:0"><a class="uname" href="${profileUrl(u.u)}" target="_blank" rel="noopener">${esc(u.u)}</a> <span class="muted">${esc(EVENT_LABELS[e.k] || e.k)}${e.src === 'you' ? ' (from this extension)' : ''}</span>${why} ${relChip(e.pk, 'sm')}${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>
       <div class="t">${esc(fmtDateTime(e.t))}</div>
     </div>`;
   };
@@ -1720,6 +1759,7 @@ async function onMainChange(e) {
     if (key === 'autoScanHours') sendBg({ type: 'rescheduleAutoScan' });
     if (key === 'theme') applyTheme();
     if (key === 'maxSnapshots' || key === 'waitDays') renderNav();
+    if (key === 'waitUnknown') { renderNav(); if (S.route === 'waiting') renderMain(); }
     toast('Saved');
   }
 }

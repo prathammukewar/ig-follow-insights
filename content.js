@@ -128,9 +128,12 @@
   // ---------- scan progress ----------
 
   function newProgress(pageSize) {
-    return { pages: 0, waitedMs: 0, listStart: 0, fFound: 0, gFound: 0, expectedF: 0, expectedG: 0, pageSize: pageSize || 50, throttles: 0 };
+    const stream = () => ({ pages: 0, found: 0, expected: 0, observed: 0, start: 0 });
+    return { pages: 0, waitedMs: 0, listStart: 0, fFound: 0, gFound: 0, expectedF: 0, expectedG: 0, pageSize: pageSize || 50, throttles: 0, k: { followers: stream(), following: stream() } };
   }
 
+  // The two lists come back in different page sizes and at different speeds, so each stream gets
+  // its own estimate; in parallel mode the slower one sets the total.
   function progressFields() {
     const p = state.prog;
     if (!p) return {};
@@ -139,15 +142,22 @@
     const found = (p.fFound || 0) + (p.gFound || 0);
     const active = p.listStart ? Math.max(0, now - p.listStart - p.waitedMs) : 0;
     const avgPageMs = p.pages ? active / p.pages : 0;
-    const remaining = Math.max(0, expectedTotal - found);
-    const pageSize = p.observed || p.pageSize;
-    const pagesRemaining = Math.ceil(remaining / pageSize);
-    const streams = p.parallel ? 2 : 1;
-    const eta = avgPageMs && expectedTotal ? Math.round((pagesRemaining * avgPageMs) / (p.parallel && p.fFound < p.expectedF && p.gFound < p.expectedG ? streams : 1)) : null;
+    const streamEta = (s) => {
+      if (!s.expected || s.found >= s.expected) return 0;
+      const own = s.start && s.pages ? Math.max(0, now - s.start - p.waitedMs) / s.pages : 0;
+      const avg = own || avgPageMs;
+      if (!avg) return null;
+      const size = s.observed || p.pageSize;
+      return Math.ceil((s.expected - s.found) / size) * avg;
+    };
+    const eF = streamEta(p.k.followers), eG = streamEta(p.k.following);
+    let eta = null;
+    if (eF != null && eG != null) eta = Math.round(p.parallel ? Math.max(eF, eG) : eF + eG);
     return {
       pages: p.pages, waitedMs: p.waitedMs, fFound: p.fFound, gFound: p.gFound, expectedF: p.expectedF, expectedG: p.expectedG,
-      avgPageMs: Math.round(avgPageMs), eta, pageSize, overallDone: found, overallTotal: expectedTotal, throttles: p.throttles,
-      parallel: !!p.parallel,
+      avgPageMs: Math.round(avgPageMs), eta, pageSize: Math.max(p.k.followers.observed, p.k.following.observed) || p.pageSize,
+      pageSizeF: p.k.followers.observed || 0, pageSizeG: p.k.following.observed || 0,
+      overallDone: found, overallTotal: expectedTotal, throttles: p.throttles, parallel: !!p.parallel,
     };
   }
 
@@ -174,6 +184,9 @@
     const remembered = probe[kind]?.forMax === maxSize ? probe[kind].size : null;
     const start = remembered || maxSize;
     const sizes = [start, ...PAGE_SIZES.filter((s) => s < start)];
+    const strm = state.prog?.k?.[kind];
+    if (strm && !label) { strm.start = Date.now(); strm.expected = expected || 0; strm.observed = probe[kind]?.size || 0; }
+    let useSurface = kind === 'followers' && probe.followers?.noSurface !== true;
     let sizeIdx = 0;
     let maxId = null;
     let emptyPages = 0;
@@ -182,7 +195,7 @@
       const qs = new URLSearchParams({ count: String(count) });
       if (maxId) qs.set('max_id', maxId);
       if (order) qs.set('order', order);
-      if (kind === 'followers') qs.set('search_surface', 'follow_list_page');
+      if (useSurface) qs.set('search_surface', 'follow_list_page');
       let json;
       try {
         json = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs}`, { probe: !maxId && sizeIdx < sizes.length - 1, bestEffort, pacer, ctl });
@@ -191,15 +204,26 @@
         if (bestEffort && !e.fatal) break;
         throw e;
       }
-      const users = Array.isArray(json.users) ? json.users : [];
+      let users = Array.isArray(json.users) ? json.users : [];
       if (!maxId && !order) {
-        const observed = users.length;
-        const size = Math.min(count, Math.max(observed, 1));
-        if (probe[kind]?.size !== size || probe[kind]?.forMax !== maxSize) {
-          probe[kind] = { size, forMax: maxSize, at: Date.now() };
-          try { await chrome.storage.local.set({ probe }); } catch {}
+        let observed = users.length;
+        // The followers list sometimes comes back in small pages when search_surface is set. Try once without it.
+        if (kind === 'followers' && useSurface && !probe.followers?.surfaceChecked && observed > 0 && observed < count && !bestEffort) {
+          let better = false;
+          try {
+            const qs2 = new URLSearchParams({ count: String(count) });
+            const j2 = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs2}`, { bestEffort: true, pacer, ctl });
+            const u2 = Array.isArray(j2.users) ? j2.users : [];
+            if (u2.length > observed) { json = j2; users = u2; observed = u2.length; better = true; }
+          } catch {}
+          if (state.prog) state.prog.pages++;
+          useSurface = !better;
+          probe.followers = { ...(probe.followers || {}), surfaceChecked: true, noSurface: better };
         }
-        if (state.prog && observed > 0) state.prog.observed = Math.max(state.prog.observed || 0, observed);
+        const size = Math.min(count, Math.max(observed, 1));
+        probe[kind] = { ...(probe[kind] || {}), size, forMax: maxSize, at: Date.now() };
+        try { await chrome.storage.local.set({ probe }); } catch {}
+        if (strm && observed > 0) strm.observed = observed;
       }
       for (const u of users) {
         const m = mapUser(u);
@@ -211,6 +235,7 @@
         state.prog.pages++;
         state.prog[kind === 'followers' ? 'fFound' : 'gFound'] = out.length;
         state.prog.throttles = pacer ? pacer.throttled : state.prog.throttles;
+        if (strm) { strm.pages++; strm.found = out.length; }
       }
       await writeState({
         ...progressFields(),
@@ -358,7 +383,8 @@
         requests: state.prog.pages,
         waitedMs: state.prog.waitedMs,
         throttles: state.prog.throttles,
-        pageSize: state.prog.observed || state.prog.pageSize,
+        pageSize: Math.max(state.prog.k.followers.observed, state.prog.k.following.observed) || state.prog.pageSize,
+        pageSizes: { f: state.prog.k.followers.observed, g: state.prog.k.following.observed },
         finishedAt: Date.now(),
       };
       const resp = await chrome.runtime.sendMessage({ type: 'scanResult', data });
