@@ -55,6 +55,11 @@ async function handle(msg) {
       }
       return { ok: true };
     }
+    case 'diagnose': {
+      const { tab } = await ensureIgTab({ create: true });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'diagnose' });
+      return r || { ok: false, error: 'No answer from the Instagram tab' };
+    }
     case 'pendingRequests': {
       const { tab } = await ensureIgTab({ create: true });
       const r = await chrome.tabs.sendMessage(tab.id, { type: 'pendingRequests' });

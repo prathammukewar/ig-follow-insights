@@ -73,6 +73,7 @@
   }
 
   const RETRY_WAITS = [20000, 45000, 90000, 180000];
+  const QUICK_RETRIES = [1500, 4000];
   const isThrottle = (r, msg) => r.status === 429 || /wait a few minutes|too many requests|rate limit/i.test(msg);
   const isActionBlock = (r, msg) => !!(r.json && r.json.feedback_required) || /feedback_required|spam|action blocked|blocked/i.test(msg);
   const THROTTLE_MS = 10 * 60 * 1000;
@@ -89,44 +90,65 @@
     }
   }
 
-  // GET JSON with rate-limit handling.
-  //   probe: a 400 is thrown right away (used to find the largest page size Instagram accepts)
-  //   bestEffort: any failure is thrown right away (used for optional passes)
-  async function getJson(path, { probe = false, bestEffort = false, pacer = null, ctl = null } = {}) {
+  function describe(r) {
+    const msg = (r.json && (r.json.message || r.json.error_title)) || '';
+    if (msg) return msg;
+    const body = (r.text || '').replace(/\s+/g, ' ').trim();
+    if (!r.json && /^</.test(body)) return 'a web page instead of data';
+    if (!body) return 'an empty reply';
+    if (!r.json) return 'unreadable data: ' + body.slice(0, 80);
+    return 'JSON without a user list (' + Object.keys(r.json).slice(0, 5).join(', ') + ')';
+  }
+
+  // A single GET.
+  //   ok: true and json on success
+  //   otherwise: { fatal } means stop the scan, { throttled } means Instagram is rate limiting,
+  //   anything else is worth retrying with a different variant of the request.
+  async function tryJson(path) {
+    let r;
+    try { r = await request(path); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
+    if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) return { ok: true, json: r.json, status: 200 };
+    const msg = (r.json && (r.json.message || r.json.error_title)) || '';
+    const detail = describe(r);
+    const fatal = r.status === 401 || /login_required|checkpoint_required|challenge_required/i.test(msg);
+    return { ok: false, status: r.status, throttled: isThrottle(r, msg), fatal, detail, html: !r.json && /^\s*</.test(r.text || '') };
+  }
+
+  // Retries a single request. Long backoff only for real rate limiting; everything else fails
+  // fast so fetchList can try the request a different way.
+  async function getJson(path, { bestEffort = false, pacer = null, ctl = null, quick = false } = {}) {
+    let last = null;
     for (let attempt = 0; ; attempt++) {
       if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
       if (pacer) await pacer.wait();
-      let r;
-      try { r = await request(path); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
-      if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) { pacer?.success(); return r.json; }
-      const msg = (r.json && (r.json.message || r.json.error_title)) || '';
-      const html = !r.json && /^\s*</.test(r.text || '');
-      const snippet = msg || (html ? 'a web page instead of data' : (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'empty reply');
-      if (probe && r.status === 400) throw new ScanError('Page size rejected', false, 400);
-      if (html && attempt >= 1) {
-        throw new ScanError('Instagram is sending a web page instead of the list, which usually means it wants you to log in again or pass a check. Open the Instagram tab, refresh it, make sure you are logged in, then scan again.', true, r.status);
-      }
-      if (bestEffort) throw new ScanError(`Request failed (${r.status || 'network error'}${msg ? ': ' + msg : ''})`, false, r.status);
-      if (r.status === 401 || r.status === 403 || /login_required|checkpoint_required|challenge_required/i.test(msg)) {
+      const r = await tryJson(path);
+      if (r.ok) { pacer?.success(); return r.json; }
+      last = r;
+      if (r.fatal) {
         throw new ScanError('Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then scan again.', true, r.status);
       }
-      if (r.status === 404) throw new ScanError('Instagram returned 404 for ' + path + '. The endpoint may have changed.', true, 404);
-      if (attempt >= RETRY_WAITS.length) {
-        throw new ScanError(`Instagram kept refusing requests (${r.status || 'network error'}${msg ? ': ' + msg : ''}). Wait 15 to 30 minutes and try again.`, true, r.status);
+      if (r.throttled) {
+        pacer?.throttle();
+        noteThrottle('scan');
+        if (bestEffort || attempt >= RETRY_WAITS.length) {
+          throw new ScanError(`Instagram is rate limiting requests (${r.detail}). Wait 10 to 15 minutes and try again.`, !bestEffort, r.status);
+        }
+        const wait = RETRY_WAITS[attempt];
+        const until = Date.now() + wait;
+        while (Date.now() < until) {
+          if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
+          await writeState({ ...progressFields(), message: `Instagram is rate limiting requests. Retrying in ${Math.ceil((until - Date.now()) / 1000)}s`, waiting: true, retryAt: until, waitReason: 'Instagram is rate limiting requests' });
+          const chunk = Math.min(3000, until - Date.now());
+          await sleep(chunk);
+          if (state.prog) state.prog.waitedMs += chunk;
+        }
+        await writeState({ ...progressFields(), waiting: false, retryAt: null, message: 'Retrying' });
+        continue;
       }
-      const throttled = isThrottle(r, msg);
-      if (throttled) { pacer?.throttle(); noteThrottle('scan'); }
-      const wait = RETRY_WAITS[attempt];
-      const why = throttled ? 'Instagram is rate limiting requests' : `Instagram answered ${r.status || 'nothing'} with ${snippet}`;
-      const until = Date.now() + wait;
-      while (Date.now() < until) {
-        if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
-        await writeState({ ...progressFields(), message: `${why}. Retrying in ${Math.ceil((until - Date.now()) / 1000)}s`, waiting: true, retryAt: until, waitReason: why });
-        const chunk = Math.min(3000, until - Date.now());
-        await sleep(chunk);
-        if (state.prog) state.prog.waitedMs += chunk;
+      if (bestEffort || quick || attempt >= QUICK_RETRIES.length) {
+        throw new ScanError(`Instagram answered ${r.status || 'nothing'} with ${r.detail}`, false, r.status);
       }
-      await writeState({ ...progressFields(), waiting: false, retryAt: null, message: 'Retrying' });
+      await sleep(QUICK_RETRIES[attempt]);
     }
   }
 
@@ -179,59 +201,86 @@
     try { const { probe } = await chrome.storage.local.get('probe'); return probe || {}; } catch { return {}; }
   }
 
+  // Ways to ask for one page, in the order we try them. Instagram sometimes refuses one shape
+  // (a page size, or the search_surface parameter) while happily answering another.
+  function pageVariants(kind, maxSize, remembered) {
+    const sizes = [maxSize, ...PAGE_SIZES.filter((s) => s < maxSize)];
+    const surfaces = kind === 'followers' ? [true, false] : [false];
+    const out = [];
+    for (const count of sizes) for (const surface of surfaces) out.push({ count, surface });
+    if (remembered) {
+      const i = out.findIndex((v) => v.count === remembered.count && v.surface === remembered.surface);
+      if (i > 0) out.unshift(out.splice(i, 1)[0]);
+    }
+    return out;
+  }
+
+  function listPath(uid, kind, { count, surface }, maxId, order) {
+    const qs = new URLSearchParams({ count: String(count) });
+    if (maxId) qs.set('max_id', maxId);
+    if (order) qs.set('order', order);
+    if (surface) qs.set('search_surface', 'follow_list_page');
+    return `/api/v1/friendships/${uid}/${kind}/?${qs}`;
+  }
+
   async function fetchList(kind, uid, expected, settings, opts = {}) {
     const { order = null, bestEffort = false, into = null, label = null, pacer = null, ctl = null } = opts;
     const out = into || [];
     const seen = new Set(out.map((u) => u.pk));
     const startCount = out.length;
-    // Followers pages are slow at large sizes, so they get their own cap (50 by default).
+    // Followers pages come back slowly at large sizes, so they get their own cap.
     const maxSize = kind === 'followers'
       ? Math.min(Number(settings.pageSize) || 200, Number(settings.followersPageSize) || 50)
       : Number(settings.pageSize) || 200;
     const probe = await loadProbe();
-    const remembered = probe[kind]?.forMax === maxSize ? probe[kind].size : null;
-    const start = remembered || maxSize;
-    const sizes = [start, ...PAGE_SIZES.filter((s) => s < start)];
+    const remembered = probe[kind]?.forMax === maxSize ? probe[kind].v : null;
+    const variants = pageVariants(kind, maxSize, remembered);
+    let vIdx = 0;
     const strm = state.prog?.k?.[kind];
     if (strm && !label) { strm.start = Date.now(); strm.expected = expected || 0; strm.observed = probe[kind]?.size || 0; }
-    let useSurface = kind === 'followers' && probe.followers?.noSurface !== true;
-    let sizeIdx = 0;
     let maxId = null;
     let emptyPages = 0;
+    let lastErr = null;
+
+    // Ask for one page, walking through the variants until one answers.
+    const fetchPage = async () => {
+      for (let tried = 0; tried < variants.length; tried++) {
+        const v = variants[(vIdx + tried) % variants.length];
+        try {
+          const json = await getJson(listPath(uid, kind, v, maxId, order), { bestEffort, pacer, ctl, quick: tried > 0 });
+          if (tried > 0) {
+            vIdx = (vIdx + tried) % variants.length;
+            probe[kind] = { ...(probe[kind] || {}), v, forMax: maxSize, at: Date.now() };
+            try { await chrome.storage.local.set({ probe }); } catch {}
+          }
+          return json;
+        } catch (e) {
+          if (e.fatal) throw e;
+          lastErr = e;
+          if (state.prog) state.prog.pages++;
+          await writeState({
+            ...progressFields(),
+            message: `${kind === 'followers' ? 'Followers' : 'Following'} request failed (${e.message}). Trying a different request shape`,
+          });
+        }
+      }
+      throw lastErr || new ScanError('Instagram would not answer the list request.', true);
+    };
+
     for (;;) {
-      const count = sizes[sizeIdx];
-      const qs = new URLSearchParams({ count: String(count) });
-      if (maxId) qs.set('max_id', maxId);
-      if (order) qs.set('order', order);
-      if (useSurface) qs.set('search_surface', 'follow_list_page');
       let json;
       try {
-        json = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs}`, { probe: !maxId && sizeIdx < sizes.length - 1, bestEffort, pacer, ctl });
+        json = await fetchPage();
       } catch (e) {
-        if (e.status === 400 && !maxId && sizeIdx < sizes.length - 1) { sizeIdx++; continue; }
         if (bestEffort && !e.fatal) break;
         throw e;
       }
-      let users = Array.isArray(json.users) ? json.users : [];
+      const users = Array.isArray(json.users) ? json.users : [];
       if (!maxId && !order) {
-        let observed = users.length;
-        // The followers list sometimes comes back in small pages when search_surface is set. Try once without it.
-        if (kind === 'followers' && useSurface && !probe.followers?.surfaceChecked && observed > 0 && observed < count && !bestEffort) {
-          let better = false;
-          try {
-            const qs2 = new URLSearchParams({ count: String(count) });
-            const j2 = await getJson(`/api/v1/friendships/${uid}/${kind}/?${qs2}`, { bestEffort: true, pacer, ctl });
-            const u2 = Array.isArray(j2.users) ? j2.users : [];
-            if (u2.length > observed) { json = j2; users = u2; observed = u2.length; better = true; }
-          } catch {}
-          if (state.prog) state.prog.pages++;
-          useSurface = !better;
-          probe.followers = { ...(probe.followers || {}), surfaceChecked: true, noSurface: better };
-        }
-        const size = Math.min(count, Math.max(observed, 1));
-        probe[kind] = { ...(probe[kind] || {}), size, forMax: maxSize, at: Date.now() };
+        const v = variants[vIdx];
+        probe[kind] = { ...(probe[kind] || {}), size: Math.max(users.length, 1), v, forMax: maxSize, at: Date.now() };
         try { await chrome.storage.local.set({ probe }); } catch {}
-        if (strm && observed > 0) strm.observed = observed;
+        if (strm && users.length) strm.observed = users.length;
       }
       for (const u of users) {
         const m = mapUser(u);
@@ -259,6 +308,35 @@
       maxId = String(next);
     }
     return out;
+  }
+
+  // Try every shape of the list request once and report what Instagram said. Used by the
+  // Diagnostics button so a failing scan can be explained without opening dev tools.
+  async function diagnose() {
+    const uid = cookie('ds_user_id');
+    if (!uid) return { ok: false, error: 'You are not logged in to Instagram in this browser.' };
+    const rows = [];
+    const cases = [
+      ['Followers, 50 per page, with search_surface', 'followers', { count: 50, surface: true }],
+      ['Followers, 50 per page, no search_surface', 'followers', { count: 50, surface: false }],
+      ['Followers, 25 per page, with search_surface', 'followers', { count: 25, surface: true }],
+      ['Followers, 200 per page, with search_surface', 'followers', { count: 200, surface: true }],
+      ['Following, 200 per page', 'following', { count: 200, surface: false }],
+      ['Following, 50 per page', 'following', { count: 50, surface: false }],
+    ];
+    for (const [label, kind, v] of cases) {
+      const t0 = Date.now();
+      const r = await tryJson(listPath(uid, kind, v, null, null));
+      rows.push({
+        label, ms: Date.now() - t0, status: r.status ?? 200,
+        ok: !!r.ok, users: r.ok ? (r.json.users || []).length : null,
+        detail: r.ok ? null : r.detail, throttled: !!r.throttled, fatal: !!r.fatal,
+      });
+      await sleep(2000);
+    }
+    let probe = {};
+    try { probe = (await chrome.storage.local.get('probe')).probe || {}; } catch {}
+    return { ok: true, rows, probe, at: Date.now() };
   }
 
   // Does this account still exist? Used to tell "unfollowed you" from "deactivated".
@@ -612,6 +690,9 @@
         return;
       case 'pendingRequests':
         reply(pendingRequests());
+        return true;
+      case 'diagnose':
+        reply(diagnose());
         return true;
       case 'listFor':
         reply(listFor(msg.pk, msg.kind || 'followers', Number(msg.max) || 5000, msg.settings || {}));

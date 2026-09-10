@@ -1448,6 +1448,12 @@ function renderSettings() {
       <div class="field"><div><div class="lbl">Theme</div></div><select data-setting="theme">${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${s.theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     </div>
     <div class="card">
+      <h2>Diagnostics</h2>
+      <p class="muted small">If a scan keeps failing, this asks Instagram for one page of each list in every shape the scan knows, and shows exactly what came back. It makes six requests and takes about fifteen seconds. Nothing is saved or changed.</p>
+      <button class="btn" data-act="diagnose" id="diagBtn">Run diagnostics</button>
+      <div id="diagResult" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
       <h2>Instagram data export</h2>
       <p class="muted small">Instagram's lists don't say when someone followed you, so dates here start at your first scan. Instagram's own export does have the dates. In the Instagram app or on the site go to <b>Settings, Accounts Center, Your information and permissions, Download your information</b>, choose <b>Some of your information</b>, tick <b>Followers and following</b>, pick <b>JSON</b> format, and download. Then drop the zip (or the JSON files inside it) here. Only people already known from a scan can be matched.</p>
       ${imp ? `<div class="callout info">Imported ${esc(fmtDateTime(imp.at))}: matched ${fmtNum(imp.matchedF)} of ${fmtNum(imp.totalF)} followers and ${fmtNum(imp.matchedG)} of ${fmtNum(imp.totalG)} following.</div>` : ''}
@@ -1666,6 +1672,35 @@ async function onMainClick(e) {
       break;
     }
     case 'importBackup': document.getElementById('importFile')?.click(); break;
+    case 'diagnose': {
+      const out = document.getElementById('diagResult');
+      btn.disabled = true;
+      btn.textContent = 'Running, about 15s';
+      if (out) out.innerHTML = '<div class="progress indet"><div class="bar"></div></div>';
+      const r = await sendBg({ type: 'diagnose' });
+      btn.disabled = false;
+      btn.textContent = 'Run diagnostics again';
+      if (!r?.ok) { if (out) out.innerHTML = `<div class="callout danger">${esc(r?.error || 'Could not run diagnostics')}</div>`; break; }
+      const rows = r.rows.map((x) => `<tr>
+        <td>${esc(x.label)}</td>
+        <td>${x.ok ? `<span class="chip ok">${fmtNum(x.users)} accounts</span>` : `<span class="chip danger">failed</span>`}</td>
+        <td>${x.status}</td>
+        <td>${(x.ms / 1000).toFixed(1)}s</td>
+        <td style="text-align:left">${esc(x.ok ? 'fine' : x.detail || '')}</td>
+      </tr>`).join('');
+      const worked = r.rows.filter((x) => x.ok);
+      const failed = r.rows.filter((x) => !x.ok);
+      let verdict;
+      if (!failed.length) verdict = '<div class="callout info">Every request worked. Whatever went wrong earlier has passed, so run a scan.</div>';
+      else if (r.rows.some((x) => x.throttled)) verdict = '<div class="callout warn">Instagram is rate limiting your account right now. Wait 10 to 15 minutes and run this again.</div>';
+      else if (r.rows.some((x) => x.fatal)) verdict = '<div class="callout danger">Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then try again.</div>';
+      else if (worked.length) verdict = `<div class="callout warn">Some shapes work and some do not. The scan now tries them in order and sticks with whichever answers, so a scan should get through. Working: ${esc(worked.map((x) => x.label).join('; '))}.</div>`;
+      else verdict = '<div class="callout danger">Instagram refused every shape. That is usually a temporary block on the account. Wait an hour, reload the Instagram tab, and try again.</div>';
+      if (out) out.innerHTML = verdict + `<div class="table-wrap"><table class="hist"><thead><tr><th>Request</th><th>Result</th><th>Status</th><th>Time</th><th style="text-align:left">What Instagram sent</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <button class="btn sm" style="margin-top:8px" data-act="copyDiag" data-text="${esc(JSON.stringify(r.rows))}">Copy details</button>`;
+      break;
+    }
+    case 'copyDiag': { try { await navigator.clipboard.writeText(btn.dataset.text || ''); toast('Copied'); } catch { toast('Could not copy', 'error'); } break; }
     case 'importExport': document.getElementById('exportFile')?.click(); break;
     case 'useAccount': await chrome.storage.local.set({ [KEYS.active]: btn.dataset.id }); break;
     case 'deleteAccount': {
