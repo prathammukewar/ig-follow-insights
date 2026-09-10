@@ -55,7 +55,7 @@
   // Shared pacing for everything that runs concurrently: keeps a minimum gap between
   // request starts, speeds up after successes and backs off after throttling.
   function makePacer(minMs, maxMs, startMs) {
-    const p = { min: Math.max(50, minMs || 250), max: Math.max(minMs || 250, maxMs || 5000), last: 0, chain: Promise.resolve(), throttled: 0 };
+    const p = { min: Math.max(500, minMs || 800), max: Math.max(minMs || 250, maxMs || 5000), last: 0, chain: Promise.resolve(), throttled: 0 };
     p.delay = Math.min(p.max, Math.max(p.min, startMs ?? p.min));
     p.wait = () => {
       const run = async () => {
@@ -100,7 +100,12 @@
       try { r = await request(path); } catch (e) { r = { status: 0, json: null, text: String(e) }; }
       if (r.status === 200 && r.json && (r.json.status === 'ok' || Array.isArray(r.json.users))) { pacer?.success(); return r.json; }
       const msg = (r.json && (r.json.message || r.json.error_title)) || '';
+      const html = !r.json && /^\s*</.test(r.text || '');
+      const snippet = msg || (html ? 'a web page instead of data' : (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'empty reply');
       if (probe && r.status === 400) throw new ScanError('Page size rejected', false, 400);
+      if (html && attempt >= 1) {
+        throw new ScanError('Instagram is sending a web page instead of the list, which usually means it wants you to log in again or pass a check. Open the Instagram tab, refresh it, make sure you are logged in, then scan again.', true, r.status);
+      }
       if (bestEffort) throw new ScanError(`Request failed (${r.status || 'network error'}${msg ? ': ' + msg : ''})`, false, r.status);
       if (r.status === 401 || r.status === 403 || /login_required|checkpoint_required|challenge_required/i.test(msg)) {
         throw new ScanError('Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then scan again.', true, r.status);
@@ -112,7 +117,7 @@
       const throttled = isThrottle(r, msg);
       if (throttled) { pacer?.throttle(); noteThrottle('scan'); }
       const wait = RETRY_WAITS[attempt];
-      const why = throttled ? 'Instagram is rate limiting requests' : `Request failed (${r.status || 'network error'})`;
+      const why = throttled ? 'Instagram is rate limiting requests' : `Instagram answered ${r.status || 'nothing'} with ${snippet}`;
       const until = Date.now() + wait;
       while (Date.now() < until) {
         if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
