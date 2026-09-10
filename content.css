@@ -1,0 +1,49 @@
+#igfi-badge {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px 9px 14px;
+  border-radius: 999px;
+  background: #16181d;
+  color: #fff;
+  font: 13px/1.25 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+#igfi-badge .igfi-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8b8f98;
+  flex: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+#igfi-badge.igfi-mutual .igfi-dot { background: #2ecc71; }
+#igfi-badge.igfi-nfb .igfi-dot { background: #ff5a5f; }
+#igfi-badge.igfi-fan .igfi-dot { background: #4ea1ff; }
+#igfi-badge .igfi-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+#igfi-badge .igfi-text b { font-weight: 600; }
+#igfi-badge .igfi-text small { opacity: 0.65; font-size: 11px; }
+#igfi-badge .igfi-x {
+  background: none;
+  border: 0;
+  color: #fff;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 0 0 2px;
+  margin: 0;
+}
+#igfi-badge .igfi-x:hover { opacity: 1; }
