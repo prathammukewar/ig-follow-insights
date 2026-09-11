@@ -36,6 +36,7 @@ const S = {
   q: '', sort: 'recent', filters: { verified: false, private: false, showWl: false }, tagFilter: '',
   limit: PAGE, sel: new Set(), lists: null, latest: null, prev: null,
   logFilter: 'all', logLimit: 150,
+  kw: { tag: '', words: '', bio: true, name: true, user: true, whole: false },
   ignoreUntil: 0, requests: null, requestsAt: 0,
 };
 
@@ -1051,6 +1052,84 @@ async function addFromWlInput() {
 
 // ---------- groups (tags and notes) ----------
 
+function escapeRe(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function kwWords() {
+  return S.kw.words.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
+}
+
+function kwFields(u) {
+  const f = [];
+  if (S.kw.bio && u.bio) f.push(['bio', u.bio]);
+  if (S.kw.name && u.n) f.push(['name', u.n]);
+  if (S.kw.user && u.u) f.push(['username', u.u]);
+  return f;
+}
+
+// Returns where the first keyword hit, so the preview can show why someone matched.
+function kwHit(pk, words) {
+  const u = S.users[pk] || {};
+  for (const [field, text] of kwFields(u)) {
+    const hay = text.toLowerCase();
+    for (const w of words) {
+      const at = S.kw.whole
+        ? (hay.match(new RegExp('(^|[^a-z0-9])' + escapeRe(w) + '([^a-z0-9]|$)')) || { index: -1 }).index
+        : hay.indexOf(w);
+      if (at < 0) continue;
+      const start = Math.max(0, at - 30);
+      return { field, word: w, snippet: (start ? '…' : '') + text.slice(start, at + w.length + 50).replace(/\s+/g, ' ') };
+    }
+  }
+  return null;
+}
+
+function kwMatches(words) {
+  if (!words.length) return [];
+  return allListedPks().filter((pk) => kwHit(pk, words));
+}
+
+function kwPreviewHTML() {
+  const words = kwWords();
+  const anyField = S.kw.bio || S.kw.name || S.kw.user;
+  if (!anyField) return '<div class="callout warn">Pick at least one place to search.</div>';
+  if (!words.length) return '<div class="muted small">Type one or more keywords to see who would be tagged.</div>';
+  const hits = kwMatches(words);
+  const already = S.kw.tag ? hits.filter((pk) => (S.tags[pk]?.t || []).includes(S.kw.tag)).length : 0;
+  if (!hits.length) {
+    const noBios = S.kw.bio && !allListedPks().some((pk) => S.users[pk]?.bio);
+    const hint = noBios ? ' No bios are loaded yet, so there is nothing to search. Load them from the Overview first.'
+      : S.kw.whole ? ' Try turning off "whole words only", or use another word.'
+      : ' Try another word, or tick more places to search.';
+    return `<div class="callout warn">Nothing matches.${hint}</div>`;
+  }
+  const shown = hits.slice(0, 10);
+  const rows = shown.map((pk) => {
+    const u = S.users[pk] || {};
+    const h = kwHit(pk, words);
+    const snip = esc(h.snippet).replace(new RegExp(escapeRe(esc(h.word)), 'ig'), (m) => `<mark>${m}</mark>`);
+    return `<div class="log-row">
+      ${avatarHTML(u, 'sm')}
+      <div style="min-width:0"><a class="uname" href="${profileUrl(u.u)}" target="_blank" rel="noopener">${esc(u.u || pk)}</a> ${relChip(pk, 'sm')}<div class="line2">${snip} <span class="muted">in ${esc(h.field)}</span></div></div>
+    </div>`;
+  }).join('');
+  return `<div class="muted small" style="margin-bottom:6px"><b>${fmtNum(hits.length)}</b> account${hits.length === 1 ? '' : 's'} match${hits.length === 1 ? 'es' : ''}${already ? `, ${fmtNum(already)} already in this group` : ''}.</div>
+    <div class="log" style="max-height:260px">${rows}${hits.length > shown.length ? `<div class="muted small" style="padding:6px 0">and ${fmtNum(hits.length - shown.length)} more</div>` : ''}</div>`;
+}
+
+function refreshKwPreview() {
+  const el2 = document.getElementById('kwResult');
+  if (el2) el2.innerHTML = kwPreviewHTML();
+  const btn = document.getElementById('kwApplyBtn');
+  if (btn) {
+    const n = kwMatches(kwWords()).length;
+    btn.textContent = n ? `Tag ${fmtNum(n)} matches` : 'Tag matches';
+    btn.disabled = !n || !S.kw.tag.trim();
+  }
+  observeAvatars();
+}
+
 function renderGroups() {
   const tags = allTags();
   const names = Object.keys(tags).sort((a, b) => tags[b] - tags[a] || a.localeCompare(b));
@@ -1058,14 +1137,21 @@ function renderGroups() {
   main.innerHTML = `
     <header class="page-head"><div><h1>Groups</h1><p class="sub">Tag people so you can filter any list by group. Add a note to remember who someone is.</p></div></header>
     <div class="card">
-      <h2>Create a group from bio keywords</h2>
-      <p class="muted small">Tags everyone whose bio, name or username contains any of the keywords. Only accounts with a loaded bio are checked (${fmtNum(withBio)} of ${fmtNum(allListedPks().length)} right now).</p>
+      <h2>Create a group from keywords</h2>
+      <p class="muted small">Searches the places you tick below for any of your keywords, shows you who matches, and tags them when you are happy. Bios are loaded for ${fmtNum(withBio)} of ${fmtNum(allListedPks().length)} accounts.</p>
       <div class="inline-form">
-        <input id="kwTag" placeholder="Group name, for example college" autocomplete="off">
-        <input id="kwWords" placeholder="Keywords, comma separated: MIT, Massachusetts Institute" autocomplete="off">
-        <button class="btn primary" data-act="kwApply">Tag matches</button>
+        <input id="kwTag" placeholder="Group name, for example college" value="${esc(S.kw.tag)}" autocomplete="off">
+        <input id="kwWords" placeholder="Keywords, comma separated: MIT, Massachusetts Institute" value="${esc(S.kw.words)}" autocomplete="off">
+        <button class="btn primary" data-act="kwApply" id="kwApplyBtn">Tag matches</button>
       </div>
-      <div id="kwResult" class="muted small" style="margin-top:8px"></div>
+      <div class="kw-opts">
+        <span class="muted small">Search in:</span>
+        <label class="chk-inline"><input type="checkbox" id="kwBio" ${S.kw.bio ? 'checked' : ''}> Bio</label>
+        <label class="chk-inline"><input type="checkbox" id="kwName" ${S.kw.name ? 'checked' : ''}> Full name</label>
+        <label class="chk-inline"><input type="checkbox" id="kwUser" ${S.kw.user ? 'checked' : ''}> Username</label>
+        <label class="chk-inline" title="Stops MIT from matching smith"><input type="checkbox" id="kwWhole" ${S.kw.whole ? 'checked' : ''}> Whole words only</label>
+      </div>
+      <div id="kwResult" style="margin-top:10px"></div>
     </div>
     <div class="card">
       <h2>Your groups</h2>
@@ -1075,8 +1161,9 @@ function renderGroups() {
         for (const pk of members) c[relOf(pk)]++;
         const parts = ['mutual', 'fan', 'nfb', 'none'].filter((k) => c[k]).map((k) => `<span class="chip ${REL[k].cls} rel" title="${REL[k].title}">${fmtNum(c[k])} ${REL[k].label.toLowerCase()}</span>`).join('');
         return `<div class="acct-row" data-tag="${esc(t)}"><span class="chip tag">${esc(t)}</span><div class="grow"><div class="muted small">${fmtNum(tags[t])} account${tags[t] === 1 ? '' : 's'}</div><div class="line3" style="margin-top:3px">${parts}</div></div><a class="btn sm" href="#/groups?tag=${encodeURIComponent(t)}">View</a><button class="btn sm ghost" data-act="renameTag">Rename</button><button class="btn sm ghost danger" data-act="deleteTag">Delete</button></div>`;
-      }).join('') : `<div class="empty small">No groups yet. Use "Groups and note" in any row's ⋯ menu, select rows and click "Tag selected", or create one from bio keywords above.</div>`}
+      }).join('') : `<div class="empty small">No groups yet. Use "Groups and note" in any row's ⋯ menu, select rows and click "Tag selected", or create one from keywords above.</div>`}
     </div>`;
+  refreshKwPreview();
 }
 
 function openTagModal(pks) {
@@ -1620,24 +1707,20 @@ async function onMainClick(e) {
       break;
     }
     case 'kwApply': {
-      const tag = document.getElementById('kwTag')?.value.trim();
-      const words = (document.getElementById('kwWords')?.value || '').split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
-      const res = document.getElementById('kwResult');
-      if (!tag || !words.length) { if (res) res.textContent = 'Give the group a name and at least one keyword.'; break; }
+      const tag = S.kw.tag.trim();
+      const words = kwWords();
+      if (!tag || !words.length) { toast('Give the group a name and at least one keyword', 'warn'); break; }
+      const hits = kwMatches(words);
       let n = 0;
-      for (const p of allListedPks()) {
-        const u = S.users[p] || {};
-        const hay = [u.bio, u.n, u.u].filter(Boolean).join('\n').toLowerCase();
-        if (!hay || !words.some((w) => hay.includes(w))) continue;
+      for (const p of hits) {
         const rec = S.tags[p] || { t: [], n: '' };
         if (!rec.t.includes(tag)) { rec.t.push(tag); n++; }
         S.tags[p] = rec;
       }
       await persistTags();
-      const msg = n ? `Tagged ${fmtNum(n)} account${n === 1 ? '' : 's'} with "${tag}".` : 'No bios matched those keywords. Load more bios first, or try other words.';
-      if (n) { toast(`Tagged ${fmtNum(n)} accounts`); renderNav(); renderMain(); }
-      const res2 = document.getElementById('kwResult');
-      if (res2) res2.textContent = msg;
+      toast(n ? `Tagged ${fmtNum(n)} account${n === 1 ? '' : 's'} with "${tag}"` : `Everyone matching is already in "${tag}"`);
+      renderNav();
+      renderMain();
       break;
     }
     case 'renameTag': {
@@ -1740,6 +1823,8 @@ async function onMainClick(e) {
 
 function onMainInput(e) {
   if (e.target.id === 'wlInput') { wlAutocomplete(e.target.value); return; }
+  if (e.target.id === 'kwWords') { S.kw.words = e.target.value; refreshKwPreview(); return; }
+  if (e.target.id === 'kwTag') { S.kw.tag = e.target.value; refreshKwPreview(); return; }
   if (e.target.id === 'q') {
     S.q = e.target.value;
     S.limit = PAGE;
@@ -1776,6 +1861,11 @@ async function onMainChange(e) {
   }
   if (t.id === 'acctSwitch') { await chrome.storage.local.set({ [KEYS.active]: t.value }); return; }
   if (t.id === 'wlMin') { S.wlMin = Number(t.value); S.wlSugLimit = 20; refreshWlSuggest(); return; }
+  if (t.id === 'kwBio' || t.id === 'kwName' || t.id === 'kwUser' || t.id === 'kwWhole') {
+    S.kw[{ kwBio: 'bio', kwName: 'name', kwUser: 'user', kwWhole: 'whole' }[t.id]] = t.checked;
+    refreshKwPreview();
+    return;
+  }
   if (t.id === 'exportFile') {
     const files = [...(t.files || [])];
     if (files.length) await importExportFiles(files);
