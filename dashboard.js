@@ -692,6 +692,7 @@ function renderListView(kind) {
       ${kind === 'tag' ? `<div class="actions"><a class="btn sm" href="#/groups">All groups</a></div>` : ''}
     </header>
     ${kind === 'whitelist' ? whitelistTopHTML() : ''}
+    ${kind === 'tag' ? groupTopHTML() : ''}
     ${kind === 'waiting' ? waitingIntroHTML() : ''}
     <div class="toolbar">
       <input class="search" id="q" placeholder="Search username, name, bio, group or note" value="${esc(S.q)}">
@@ -874,6 +875,7 @@ function rowHTML(pk, opts = {}) {
       <div class="dropdown row-menu"><button class="icon-btn" data-act="menu" title="More">⋯</button><div class="menu">
         <button data-act="bio">${u.bioAt ? 'Refresh bio and counts' : 'Load bio and counts'}</button>
         <button data-act="tag">Groups and note</button>
+        ${S.route === 'groups' && S.params.tag ? `<button data-act="untag">Remove from ${esc(S.params.tag)}</button>` : ''}
         <button data-act="mutuals">Mutual friends</button>
         <a href="${profileUrl(u.u)}" target="_blank" rel="noopener">Open on Instagram</a>
       </div></div>
@@ -930,10 +932,9 @@ function whitelistTopHTML() {
   return `
     <div class="card">
       <h2>Add someone</h2>
-      <div class="inline-form suggest-wrap">
-        <input id="wlInput" placeholder="Start typing a username or name" autocomplete="off" spellcheck="false">
+      <div class="inline-form">
+        ${pickerHTML('wl', 'Start typing a username or name')}
         <button class="btn" data-act="wlAdd">Add to whitelist</button>
-        <div class="suggest" id="wlSug" hidden></div>
       </div>
       <div class="muted small" style="margin-top:6px">Suggestions come from the people you follow, as of your last scan.</div>
     </div>
@@ -981,11 +982,55 @@ function refreshWhitelist() {
   renderNav();
 }
 
-function wlAutocomplete(raw) {
-  const box = document.getElementById('wlSug');
-  if (!box) return;
-  const q = raw.trim().replace(/^@/, '').toLowerCase();
-  if (!q) { box.hidden = true; box.innerHTML = ''; S.wlMatches = []; S.wlHi = -1; return; }
+// ---------- person picker (shared typeahead) ----------
+
+// Each picker says who it can offer, who to leave out, and what to do with the pick.
+const PICKERS = {
+  wl: {
+    pool: () => [...S.lists.following],
+    skip: (pk) => S.wl.has(pk),
+    none: (q) => `No one you follow matches "${q}"`,
+    onPick: (pk) => wlAddPk(pk),
+  },
+  tag: {
+    pool: () => allListedPks(),
+    skip: (pk) => (S.tags[pk]?.t || []).includes(S.params.tag || ''),
+    none: (q) => `Nobody in your lists matches "${q}"`,
+    onPick: (pk) => tagAddPk(pk, S.params.tag || ''),
+  },
+  tagNew: {
+    pool: () => allListedPks(),
+    skip: (pk) => {
+      const name = (document.getElementById('newTagName')?.value || '').trim();
+      return !!name && (S.tags[pk]?.t || []).includes(name);
+    },
+    none: (q) => `Nobody in your lists matches "${q}"`,
+    onPick: (pk) => {
+      const name = (document.getElementById('newTagName')?.value || '').trim();
+      if (!name) { toast('Name the group first', 'warn'); return Promise.resolve(); }
+      return tagAddPk(pk, name);
+    },
+  },
+};
+
+function pickerHTML(id, placeholder) {
+  return `<div class="suggest-wrap">
+    <input class="picker-input" data-picker="${id}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false">
+    <div class="suggest" hidden></div>
+  </div>`;
+}
+
+const pickerState = {};
+const suggestBox = (input) => input.closest('.suggest-wrap')?.querySelector('.suggest');
+
+function pickerSearch(input) {
+  const id = input.dataset.picker;
+  const cfg = PICKERS[id];
+  const box = suggestBox(input);
+  if (!cfg || !box) return;
+  const st = (pickerState[id] = pickerState[id] || { matches: [], hi: -1 });
+  const q = input.value.trim().replace(/^@/, '').toLowerCase();
+  if (!q) { box.hidden = true; box.innerHTML = ''; st.matches = []; st.hi = -1; return; }
   const score = (u) => {
     const un = (u.u || '').toLowerCase(), n = (u.n || '').toLowerCase();
     if (un.startsWith(q)) return 0;
@@ -995,59 +1040,82 @@ function wlAutocomplete(raw) {
     return 9;
   };
   const m = [];
-  for (const pk of S.lists.following) {
-    if (S.wl.has(pk)) continue;
+  for (const pk of cfg.pool()) {
+    if (cfg.skip(pk)) continue;
     const u = S.users[pk] || {};
     const sc = score(u);
     if (sc < 9) m.push([sc, pk, u]);
   }
   m.sort((a, b) => a[0] - b[0] || (b[2].fc ?? -1) - (a[2].fc ?? -1) || (a[2].u || '').localeCompare(b[2].u || ''));
   const top = m.slice(0, 8);
-  S.wlMatches = top.map((x) => x[1]);
-  S.wlHi = top.length ? 0 : -1;
+  st.matches = top.map((x) => x[1]);
+  st.hi = top.length ? 0 : -1;
   box.innerHTML = top.length
-    ? top.map(([, pk, u], i) => `<div class="item ${i === 0 ? 'active' : ''}" data-pk="${esc(pk)}">${avatarHTML(u, 'sm')}<div class="grow"><div><b>${esc(u.u || pk)}</b>${u.v ? ' <span class="vbadge">✓</span>' : ''} ${relChip(pk)}</div>${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>${u.fc != null ? `<span class="chip gray">${fmtCount(u.fc)} followers</span>` : ''}</div>`).join('')
-    : `<div class="item none">No one you follow matches "${esc(q)}"</div>`;
+    ? top.map(([, pk, u], i) => `<div class="item ${i === 0 ? 'active' : ''}" data-pk="${esc(pk)}">${avatarHTML(u, 'sm')}<div class="grow"><div><b>${esc(u.u || pk)}</b>${u.v ? ' <span class="vbadge">✓</span>' : ''} ${relChip(pk, 'sm')}</div>${u.n ? `<div class="line2">${esc(u.n)}</div>` : ''}</div>${u.fc != null ? `<span class="chip gray">${fmtCount(u.fc)} followers</span>` : ''}</div>`).join('')
+    : `<div class="item none">${esc(cfg.none(q))}</div>`;
   box.hidden = false;
+  observeAvatars(box);
 }
 
-function wlHighlight(delta) {
-  if (!S.wlMatches?.length) return;
-  S.wlHi = (S.wlHi + delta + S.wlMatches.length) % S.wlMatches.length;
-  document.querySelectorAll('#wlSug .item').forEach((it, i) => it.classList.toggle('active', i === S.wlHi));
-  document.querySelector('#wlSug .item.active')?.scrollIntoView({ block: 'nearest' });
+function pickerHighlight(input, delta) {
+  const st = pickerState[input.dataset.picker];
+  const box = suggestBox(input);
+  if (!st?.matches.length || !box) return;
+  st.hi = (st.hi + delta + st.matches.length) % st.matches.length;
+  box.querySelectorAll('.item').forEach((it, i) => it.classList.toggle('active', i === st.hi));
+  box.querySelector('.item.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+function pickerClear(input) {
+  const box = suggestBox(input);
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  input.value = '';
+  pickerState[input.dataset.picker] = { matches: [], hi: -1 };
+}
+
+async function pickerSubmit(input) {
+  const id = input.dataset.picker;
+  const cfg = PICKERS[id];
+  const st = pickerState[id];
+  const name = input.value.trim().replace(/^@/, '').toLowerCase();
+  if (!cfg || !name) return;
+  const exact = cfg.pool().find((pk) => (S.users[pk]?.u || '').toLowerCase() === name && !cfg.skip(pk));
+  const pk = exact || (st?.hi >= 0 ? st.matches[st.hi] : null);
+  if (!pk) { toast(cfg.none(name), 'warn'); return; }
+  await cfg.onPick(pk);
 }
 
 async function wlAddPk(pk) {
   if (!pk || S.wl.has(pk)) return;
   S.wl.add(pk);
   await persistWl();
-  const input = document.getElementById('wlInput');
-  if (input) input.value = '';
-  const box = document.getElementById('wlSug');
-  if (box) { box.hidden = true; box.innerHTML = ''; }
-  S.wlMatches = []; S.wlHi = -1;
+  const input = main.querySelector('[data-picker="wl"]');
+  if (input) { pickerClear(input); input.focus(); }
   toast(`@${S.users[pk]?.u || pk} added to the whitelist`);
   refreshWhitelist();
-  input?.focus();
+}
+
+async function tagAddPk(pk, tag) {
+  if (!pk || !tag) return;
+  const rec = S.tags[pk] || { t: [], n: '' };
+  if (!rec.t.includes(tag)) rec.t.push(tag);
+  S.tags[pk] = rec;
+  await persistTags();
+  const input = main.querySelector('[data-picker="tag"], [data-picker="tagNew"]');
+  if (input) { pickerClear(input); input.focus(); }
+  toast(`@${S.users[pk]?.u || pk} added to "${tag}"`);
+  renderNav();
+  if (S.route === 'groups' && S.params.tag) renderListBody('tag');
+  else renderMain();
 }
 
 function onMainKeydown(e) {
-  if (e.target.id !== 'wlInput') return;
-  if (e.key === 'ArrowDown') { e.preventDefault(); wlHighlight(1); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); wlHighlight(-1); }
-  else if (e.key === 'Enter') { e.preventDefault(); addFromWlInput(); }
-  else if (e.key === 'Escape') { const box = document.getElementById('wlSug'); if (box) box.hidden = true; }
-}
-
-async function addFromWlInput() {
-  const input = document.getElementById('wlInput');
-  const name = (input?.value || '').trim().replace(/^@/, '').toLowerCase();
-  if (!name) return;
-  const exact = [...S.lists.following].find((pk) => (S.users[pk]?.u || '').toLowerCase() === name);
-  const pk = exact || (S.wlHi >= 0 ? S.wlMatches?.[S.wlHi] : null);
-  if (!pk) { toast(`No one you follow matches "${name}"`, 'warn'); return; }
-  await wlAddPk(pk);
+  const input = e.target.closest?.('.picker-input');
+  if (!input) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); pickerHighlight(input, 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); pickerHighlight(input, -1); }
+  else if (e.key === 'Enter') { e.preventDefault(); pickerSubmit(input); }
+  else if (e.key === 'Escape') { const box = suggestBox(input); if (box) box.hidden = true; }
 }
 
 // ---------- groups (tags and notes) ----------
@@ -1130,6 +1198,17 @@ function refreshKwPreview() {
   observeAvatars();
 }
 
+function groupTopHTML() {
+  return `<div class="card">
+    <h2>Add someone to this group</h2>
+    <div class="inline-form">
+      ${pickerHTML('tag', 'Start typing a username or name')}
+      <button class="btn" data-act="tagAdd">Add to ${esc(S.params.tag || 'group')}</button>
+    </div>
+    <div class="muted small" style="margin-top:6px">Anyone from your last scan can be added, whether or not they follow you. Use the ⋯ menu on a row to remove someone or add a note.</div>
+  </div>`;
+}
+
 function renderGroups() {
   const tags = allTags();
   const names = Object.keys(tags).sort((a, b) => tags[b] - tags[a] || a.localeCompare(b));
@@ -1152,6 +1231,16 @@ function renderGroups() {
         <label class="chk-inline" title="Stops MIT from matching smith"><input type="checkbox" id="kwWhole" ${S.kw.whole ? 'checked' : ''}> Whole words only</label>
       </div>
       <div id="kwResult" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <h2>Add someone by hand</h2>
+      <p class="muted small">Pick a group you already have or type a new name, then start typing a person.</p>
+      <div class="inline-form">
+        <input id="newTagName" list="tagNameList" placeholder="Group name, new or existing" value="${esc(S.newTagName || '')}" autocomplete="off">
+        <datalist id="tagNameList">${names.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
+        ${pickerHTML('tagNew', 'Start typing a username or name')}
+        <button class="btn" data-act="tagAdd">Add to group</button>
+      </div>
     </div>
     <div class="card">
       <h2>Your groups</h2>
@@ -1628,8 +1717,12 @@ async function importExportFiles(files) {
 async function onMainClick(e) {
   const bio = e.target.closest('.bio');
   if (bio && !e.target.closest('[data-act]')) { bio.classList.toggle('open'); return; }
-  const sug = e.target.closest('#wlSug .item[data-pk]');
-  if (sug) { await wlAddPk(sug.dataset.pk); return; }
+  const sug = e.target.closest('.suggest .item[data-pk]');
+  if (sug) {
+    const input = sug.closest('.suggest-wrap')?.querySelector('.picker-input');
+    if (input) await PICKERS[input.dataset.picker]?.onPick(sug.dataset.pk);
+    return;
+  }
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const act = btn.dataset.act;
@@ -1655,6 +1748,19 @@ async function onMainClick(e) {
     case 'wl': closeMenus(); await toggleWl(pk); break;
     case 'bio': closeMenus(); await loadSingleProfile(pk, row?.querySelector('[data-act="bio"].btn')); break;
     case 'tag': closeMenus(); openTagModal([pk]); break;
+    case 'untag': {
+      closeMenus();
+      const t = S.params.tag;
+      const rec = S.tags[pk];
+      if (!rec || !t) break;
+      rec.t = (rec.t || []).filter((x) => x !== t);
+      if (!rec.t.length && !rec.n) delete S.tags[pk];
+      await persistTags();
+      toast(`@${S.users[pk]?.u || pk} removed from "${t}"`);
+      renderNav();
+      renderListBody('tag');
+      break;
+    }
     case 'mutuals': closeMenus(); showMutuals(pk); break;
     case 'copyMutuals': { try { await navigator.clipboard.writeText(btn.dataset.names || ''); toast('Copied'); } catch { toast('Could not copy', 'error'); } break; }
     case 'loadBios': startProfileLoad([...main.querySelectorAll('#list .row')].map((r) => r.dataset.pk)); break;
@@ -1695,7 +1801,8 @@ async function onMainClick(e) {
       try { await navigator.clipboard.writeText(names); toast(`Copied ${fmtNum(pks.length)} usernames`); } catch { toast('Could not copy', 'error'); }
       break;
     }
-    case 'wlAdd': await addFromWlInput(); break;
+    case 'wlAdd': { const p = main.querySelector('[data-picker="wl"]'); if (p) await pickerSubmit(p); break; }
+    case 'tagAdd': { const p = main.querySelector('[data-picker="tag"], [data-picker="tagNew"]'); if (p) await pickerSubmit(p); break; }
     case 'loadNfbCountsLegacy': break;
     case 'wlSugMore': S.wlSugLimit = (S.wlSugLimit || 20) + 20; refreshWlSuggest(); break;
     case 'wlAddShown': {
@@ -1822,7 +1929,8 @@ async function onMainClick(e) {
 }
 
 function onMainInput(e) {
-  if (e.target.id === 'wlInput') { wlAutocomplete(e.target.value); return; }
+  if (e.target.classList.contains('picker-input')) { pickerSearch(e.target); return; }
+  if (e.target.id === 'newTagName') { S.newTagName = e.target.value; const p = main.querySelector('[data-picker="tagNew"]'); if (p && p.value) pickerSearch(p); return; }
   if (e.target.id === 'kwWords') { S.kw.words = e.target.value; refreshKwPreview(); return; }
   if (e.target.id === 'kwTag') { S.kw.tag = e.target.value; refreshKwPreview(); return; }
   if (e.target.id === 'q') {
