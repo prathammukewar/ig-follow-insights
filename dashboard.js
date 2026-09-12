@@ -1,7 +1,7 @@
 import {
   KEYS, DEFAULT_SETTINGS, EVENT_LABELS, getSettings, saveSettings, snapshotSets, snapshotStats, diffSnapshots,
   loadAccount, applyLocalAction, deleteSnapshot, deleteAccountData, exportBackup, importBackup, mergeUserFields,
-  saveTags, parseExportEntries, importDataExport,
+  saveTags, parseExportEntries, importDataExport, SCAN_PRESETS, BIO_PRESETS, prioritizeForProfiles, actionBudget, recordAction,
 } from './lib/store.js';
 import {
   esc, el, fmtNum, fmtDate, fmtDateTime, relTime, fmtDuration, initials, profileUrl, toCSV, download, stamp, sleep, readZipEntries,
@@ -65,6 +65,7 @@ const LIST_META = {
   following: { title: 'Following', sub: 'Everyone you follow, as of the last scan.', empty: 'You are not following anyone.' },
   whitelist: { title: 'Whitelist', sub: 'People you want to keep following even if they do not follow back. They are hidden from the Not following back list and skipped by bulk unfollows.', empty: 'Your whitelist is empty. Use the star on any row to add someone.' },
   tag: { title: 'Group', sub: '', empty: 'Nobody in this group yet.' },
+  search: { title: 'Search', sub: 'Everyone the extension has ever seen, including people who have since unfollowed or been unfollowed.', empty: 'No one matches.' },
 };
 
 const main = document.getElementById('main');
@@ -77,8 +78,30 @@ const scanBanner = document.getElementById('scanBanner');
 
 async function init() {
   sendBg({ type: 'clearBadge' });
+  applyDensity();
   await loadAll();
   applyTheme();
+  checkLogin();
+  const gs = document.getElementById('globalSearch');
+  let gsTimer = 0;
+  gs.addEventListener('input', () => {
+    clearTimeout(gsTimer);
+    const q = gs.value.trim();
+    gsTimer = setTimeout(() => { if (q.length >= 2) location.hash = '#/search?' + new URLSearchParams({ q }).toString(); }, 250);
+  });
+  gs.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const q = gs.value.trim(); if (q) location.hash = '#/search?' + new URLSearchParams({ q }).toString(); } });
+  document.addEventListener('keydown', (e) => {
+    const typing = /^(input|textarea|select)$/i.test(e.target.tagName) || e.target.isContentEditable;
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.dropdown.open').forEach((d) => d.classList.remove('open'));
+      document.querySelectorAll('.suggest').forEach((b) => { b.hidden = true; });
+      if (document.querySelector('#modalRoot .modal') && !document.querySelector('#modalRoot .progress .bar[style*="width"]')) closeModal();
+      return;
+    }
+    if (typing) return;
+    if (e.key === '/') { e.preventDefault(); (document.getElementById('q') || gs).focus(); }
+    if (e.key === 'a' && (e.metaKey || e.ctrlKey) && document.querySelector('#list .row')) { e.preventDefault(); onMainClick({ target: main.querySelector('[data-act="selectVisible"]') || document.body, }); }
+  });
   parseRoute();
   renderAll();
   window.addEventListener('hashchange', () => { parseRoute(); resetListState(); renderAll(); });
@@ -114,6 +137,7 @@ async function loadAll() {
   if (S.uid) {
     const d = await loadAccount(S.uid);
     S.users = d.users; S.snaps = d.snaps; S.events = d.events; S.wl = new Set(d.whitelist); S.tags = d.tags;
+    S.sent = (await chrome.storage.local.get(`pending_${S.uid}`))[`pending_${S.uid}`] || [];
   } else {
     S.users = {}; S.snaps = []; S.events = []; S.wl = new Set(); S.tags = {};
   }
@@ -135,17 +159,41 @@ function applyTheme() {
 function parseRoute() {
   const h = location.hash.replace(/^#\/?/, '');
   const [path, qs] = h.split('?');
-  S.route = NAV.some((n) => n.id === path) ? path : 'overview';
+  S.route = NAV.some((n) => n.id === path) || path === 'search' ? path : 'overview';
   S.params = Object.fromEntries(new URLSearchParams(qs || ''));
 }
 
+function viewKey() {
+  return 'igfi.view.' + (S.route === 'groups' && S.params.tag ? 'tag' : S.route);
+}
+
 function resetListState() {
-  S.q = '';
+  S.q = S.route === 'search' ? (S.params.q || '') : '';
   S.limit = PAGE;
   S.sel = new Set();
   S.filters = { verified: false, private: false, showWl: false };
   S.tagFilter = '';
   S.sort = S.route === 'waiting' ? 'longest' : 'recent';
+  try {
+    const saved = JSON.parse(localStorage.getItem(viewKey()) || 'null');
+    if (saved) {
+      if (saved.sort) S.sort = saved.sort;
+      if (saved.filters) S.filters = { ...S.filters, ...saved.filters };
+      if (saved.tagFilter && allTags()[saved.tagFilter]) S.tagFilter = saved.tagFilter;
+    }
+  } catch {}
+}
+
+function rememberView() {
+  try { localStorage.setItem(viewKey(), JSON.stringify({ sort: S.sort, filters: S.filters, tagFilter: S.tagFilter })); } catch {}
+}
+
+function densityCompact() {
+  try { return localStorage.getItem('igfi.density') === 'compact'; } catch { return false; }
+}
+
+function applyDensity() {
+  document.body.classList.toggle('compact', densityCompact());
 }
 
 async function onStorageChange(changes, area) {
@@ -260,6 +308,7 @@ function baseList(kind) {
       const tag = S.params.tag || '';
       return Object.keys(S.tags).filter((pk) => (S.tags[pk].t || []).includes(tag));
     }
+    case 'search': return Object.keys(S.users);
     default: return [];
   }
 }
@@ -384,6 +433,30 @@ function renderScanBox() {
     <div class="hint">Uses your logged-in Instagram tab. One opens in the background if needed.</div>`;
 }
 
+async function checkLogin() {
+  const r = await sendBg({ type: 'igStatus' });
+  S.login = r?.ok ? r : null;
+  renderLoginBanner();
+}
+
+function renderLoginBanner() {
+  let el2 = document.getElementById('loginBanner');
+  if (!el2) {
+    el2 = document.createElement('div');
+    el2.id = 'loginBanner';
+    scanBanner.parentElement.insertBefore(el2, scanBanner);
+  }
+  const l = S.login;
+  if (!l || !l.tab || l.loggedIn !== false || S.loginDismissed) { el2.innerHTML = ''; return; }
+  el2.innerHTML = `<div style="padding:26px 32px 0;max-width:1180px"><div class="card scan-card err" style="margin-bottom:0">
+    <div class="scan-head">
+      <div><h2 style="margin:0">Instagram is logged out in this browser</h2><div class="muted small">Scans, profile loading and follow or unfollow actions will fail until you log in on instagram.com.</div></div>
+      <div class="actions"><a class="btn sm primary" href="https://www.instagram.com/accounts/login/" target="_blank" rel="noopener">Open Instagram</a><button class="btn sm ghost" data-act="dismissLogin">Dismiss</button></div>
+    </div>
+  </div></div>`;
+  el2.addEventListener('click', onMainClick, { once: true });
+}
+
 function throttleHTML() {
   const t = S.throttle;
   if (!t || !t.until || Date.now() > t.until || S.throttleDismissed === t.at) return '';
@@ -479,6 +552,7 @@ function renderMain() {
     case 'settings': return renderSettings();
     case 'groups': return S.params.tag ? renderListView('tag') : renderGroups();
     case 'requests': return renderRequests();
+    case 'search': return renderListView('search');
     case 'whitelist': return renderListView('whitelist');
     default: return renderListView(S.route);
   }
@@ -538,6 +612,7 @@ function renderOverview() {
       <a class="tile" href="#/fans"><div class="label">Fans</div><div class="value">${fmtNum(st.fans)}</div><div class="delta">follow you, not followed back</div></a>
       <a class="tile" href="#/mutual"><div class="label">Mutual</div><div class="value">${fmtNum(st.mutual)}</div><div class="delta">${st.g ? Math.round((st.mutual / st.g) * 100) : 0}% of who you follow</div></a>
       <div class="tile"><div class="label">Follower ratio</div><div class="value">${ratio ? ratio.toFixed(2) : '–'}</div><div class="delta">followers per following</div></div>
+      ${followBackTileHTML()}
     </div>
     ${countGapHTML(st)}
     <div class="card">
@@ -561,6 +636,17 @@ function renderOverview() {
     </div>`;
   renderChart(document.getElementById('chart'));
   observeAvatars();
+}
+
+// Of the people you started following in the last 30 days, how many follow you now?
+function followBackTileHTML() {
+  const cutoff = Date.now() - 30 * 86400000;
+  const started = new Set(S.events.filter((e) => e.k === 'new_following' && e.t > cutoff).map((e) => e.pk));
+  if (!started.size) return `<div class="tile"><div class="label">Follow-back rate</div><div class="value">–</div><div class="delta">no follows seen in the last 30 days</div></div>`;
+  let back = 0;
+  for (const pk of started) if (S.lists.followers.has(pk)) back++;
+  const pct = Math.round((back / started.size) * 100);
+  return `<div class="tile"><div class="label">Follow-back rate</div><div class="value">${pct}%</div><div class="delta">${fmtNum(back)} of ${fmtNum(started.size)} you followed in 30 days</div></div>`;
 }
 
 function countGapHTML(st) {
@@ -648,7 +734,7 @@ function updateBioBtn() {
 
 async function startProfileLoad(pks, { force = false } = {}) {
   if (bioRunning()) { await sendBg({ type: 'cancelProfiles' }); toast('Stopping the profile loader'); return; }
-  const todo = force ? pks : pks.filter((pk) => !S.users[pk]?.bioAt);
+  const todo = prioritizeForProfiles(force ? pks : pks.filter((pk) => !S.users[pk]?.bioAt), S.lists.followers, S.lists.following, S.wl);
   if (!todo.length) { toast('Those profiles are already loaded'); return; }
   const r = await sendBg({ type: 'loadProfiles', pks: todo });
   if (!r?.ok) { toast(r?.error || 'Could not start loading profiles', 'error', 6000); return; }
@@ -671,6 +757,7 @@ async function loadSingleProfile(pk, btn) {
 // ---------- list views ----------
 
 function listTitle(kind) {
+  if (kind === 'search') return { title: `Search: ${S.params.q || ''}`, sub: LIST_META.search.sub, empty: LIST_META.search.empty };
   if (kind === 'tag') return { title: S.params.tag || 'Group', sub: `Everyone tagged "${S.params.tag}".`, empty: LIST_META.tag.empty };
   if (kind === 'waiting') return { title: 'Waiting room', sub: `People you followed at least ${S.settings.waitDays} days ago who still have not followed back. Sorted by who has kept you waiting longest.`, empty: LIST_META.waiting.empty };
   return LIST_META[kind];
@@ -702,6 +789,7 @@ function renderListView(kind) {
       <label class="chk-inline"><input type="checkbox" id="fPrivate" ${S.filters.private ? 'checked' : ''}> Private</label>
       ${kind === 'nfb' ? `<label class="chk-inline"><input type="checkbox" id="fShowWl" ${S.filters.showWl ? 'checked' : ''}> Show whitelisted</label>` : ''}
       <span class="count" id="count"></span>
+      <button class="icon-btn ${densityCompact() ? 'on' : ''}" data-act="density" title="Compact rows">☰</button>
       <button class="btn sm" data-act="loadBios" data-idle="Load bios" title="Fetch bio and follower counts for the rows on screen">Load bios</button>
       <button class="btn sm" data-act="selectVisible">Select all</button>
       <div class="dropdown"><button class="btn sm" data-act="menu">Export</button><div class="menu">
@@ -757,8 +845,10 @@ function renderBulkbar() {
     <button class="btn sm" data-act="bulkWl">Whitelist selected</button>
     <button class="btn sm" data-act="bulkTag">Tag selected</button>
     <button class="btn sm" data-act="bulkBios">Load bios for selected</button>
+    <span class="budget" id="budgetLine"></span>
     <span class="spacer"></span>
     <button class="btn sm ghost" data-act="clearSel">Clear selection</button>`;
+  renderBudgetLine();
 }
 
 function sinceText(pk) {
@@ -960,7 +1050,11 @@ function wlSuggestHTML() {
       <div><h2 style="margin-bottom:2px">Suggested for your whitelist</h2><p class="sub small">Accounts you follow that don't follow back, ranked by how many followers they have. Popular accounts rarely follow back, so these are the ones you probably want to keep.</p></div>
       <div class="actions"><label class="chk-inline">At least <select id="wlMin">${WL_MIN_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === min ? 'selected' : ''}>${l}</option>`).join('')}</select> followers</label></div>
     </div>
-    ${cands.length === 0 ? `<div class="empty small">Everyone you follow either follows you back or is already whitelisted.</div>` : ''}
+    ${cands.length ? `<div class="line3" style="margin-bottom:10px">
+      <span class="muted small">Quick add:</span>
+      <button class="btn sm" data-act="wlVerified">All verified (${fmtNum(cands.filter((pk) => S.users[pk]?.v).length)})</button>
+      <button class="btn sm" data-act="wlBig">Everyone with 100K+ followers (${fmtNum(cands.filter((pk) => (S.users[pk]?.fc ?? 0) >= 100000).length)})</button>
+    </div>` : `<div class="empty small">Everyone you follow either follows you back or is already whitelisted.</div>`}
     ${missing ? `<div class="callout info"><b>${fmtNum(missing)} of ${fmtNum(cands.length)}</b> accounts don't have follower counts yet, so they can't be ranked. <button class="btn sm" data-act="loadNfbCounts" data-idle="Load counts for ${fmtNum(missing)}">Load counts for ${fmtNum(missing)}</button> <span class="muted small">about ${est} min${est === 1 ? '' : 's'}, in the background</span></div>` : ''}
     ${shown.length ? `<div class="list">${shown.map((pk) => rowHTML(pk, { wlAdd: true })).join('')}</div>` : (cands.length && !missing ? `<div class="empty small">No one above that follower count. Lower the threshold to see more.</div>` : (cands.length ? `<div class="empty small">Load counts to see suggestions.</div>` : ''))}
     ${ranked.length > shown.length ? `<div class="more"><button class="btn" data-act="wlSugMore">Show more (${fmtNum(ranked.length - shown.length)} left)</button></div>` : ''}
@@ -1301,8 +1395,25 @@ function renderRequests() {
       <div class="actions"><button class="btn primary" data-act="loadRequests" id="reqBtn">${list ? 'Refresh' : 'Load requests from Instagram'}</button></div>
     </header>
     ${list ? `<div class="muted small" style="margin-bottom:10px">${fmtNum(list.length)} pending · loaded ${esc(relTime(S.requestsAt))}</div>` : ''}
-    <div class="list" id="list">${list ? (list.length ? list.map((u) => rowHTML(u.pk, { request: true })).join('') : `<div class="empty"><b>No pending requests</b>Nobody is waiting on you right now.</div>`) : `<div class="empty"><b>Not loaded yet</b>Click the button to fetch your pending follow requests.</div>`}</div>`;
+    <div class="list" id="list">${list ? (list.length ? list.map((u) => rowHTML(u.pk, { request: true })).join('') : `<div class="empty"><b>No pending requests</b>Nobody is waiting on you right now.</div>`) : `<div class="empty"><b>Not loaded yet</b>Click the button to fetch your pending follow requests.</div>`}</div>
+    ${sentRequestsHTML()}`;
   observeAvatars();
+}
+
+// Requests you have sent to private accounts, from the Instagram data export (Instagram has no
+// web endpoint for these). Cancelling one is the same request as an unfollow.
+function sentRequestsHTML() {
+  const sent = S.sent || [];
+  return `<div class="card" style="margin-top:20px">
+    <h2>Requests you have sent</h2>
+    ${sent.length ? `<p class="muted small">From your Instagram data export${S.account?.exportImport ? ' imported ' + esc(fmtDate(S.account.exportImport.at)) : ''}. ${fmtNum(sent.length)} private accounts have not accepted you yet.</p>
+      <div class="list">${sent.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).map((x) => `<div class="log-row">
+        ${avatarHTML(x.pk ? (S.users[x.pk] || { u: x.u }) : { u: x.u }, 'sm')}
+        <div style="min-width:0"><a class="uname" href="${profileUrl(x.u)}" target="_blank" rel="noopener">${esc(x.u)}</a>${x.ts ? `<div class="line2">Requested ${esc(fmtDate(x.ts))}</div>` : ''}</div>
+        <div>${x.pk ? `<button class="btn sm" data-act="cancelSent" data-pk="${esc(x.pk)}">Cancel request</button>` : '<span class="muted small">not in your lists</span>'}</div>
+      </div>`).join('')}</div>`
+      : `<p class="muted small">Instagram has no web endpoint for the requests you have sent, but its data export includes them. Import the export in Settings and they will show up here, with a cancel button for anyone the extension already knows.</p>`}
+  </div>`;
 }
 
 async function loadRequests() {
@@ -1527,7 +1638,8 @@ function renderChart(container) {
     const n = snaps.length;
     const f = snaps.map((s) => s.followers.length);
     const g = snaps.map((s) => s.following.length);
-    let lo = Math.min(...f, ...g), hi = Math.max(...f, ...g);
+    const nfb = snaps.map((s) => { const fs = new Set(s.followers); return s.following.filter((pk) => !fs.has(pk)).length; });
+    let lo = Math.min(...f, ...g, ...nfb), hi = Math.max(...f, ...g, ...nfb);
     const span = Math.max(4, hi - lo);
     lo = Math.max(0, Math.floor(lo - span * 0.12));
     hi = Math.ceil(hi + span * 0.12);
@@ -1544,13 +1656,14 @@ function renderChart(container) {
     const path = (arr) => arr.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
     const dots = (arr, color) => (n <= 60 ? arr.map((v, i) => `<circle class="dot" cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3.5" fill="${color}"/>`).join('') : '');
     container.innerHTML = `
-      <div class="legend"><span><i style="background:var(--series-1)"></i>Followers</span><span><i style="background:var(--series-2)"></i>Following</span></div>
+      <div class="legend"><span><i style="background:var(--series-1)"></i>Followers</span><span><i style="background:var(--series-2)"></i>Following</span><span><i style="background:var(--series-3)"></i>Not following back</span></div>
       <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
         <g class="grid">${grid.join('')}</g>
         <g class="axis">${xlabels.join('')}</g>
         <path class="line" d="${path(f)}" stroke="var(--series-1)"/>
         <path class="line" d="${path(g)}" stroke="var(--series-2)"/>
-        ${dots(f, 'var(--series-1)')}${dots(g, 'var(--series-2)')}
+        <path class="line" d="${path(nfb)}" stroke="var(--series-3)"/>
+        ${dots(f, 'var(--series-1)')}${dots(g, 'var(--series-2)')}${dots(nfb, 'var(--series-3)')}
         <line class="cross" id="cross" x1="0" x2="0" y1="${pt}" y2="${H - pb}" style="display:none"/>
         <rect x="${pl}" y="${pt}" width="${W - pl - pr}" height="${H - pt - pb}" fill="transparent" id="hit"/>
       </svg>
@@ -1566,7 +1679,7 @@ function renderChart(container) {
       for (let i = 0; i < n; i++) { const dd = Math.abs(x(i) - px); if (dd < bd) { bd = dd; best = i; } }
       cross.setAttribute('x1', x(best)); cross.setAttribute('x2', x(best)); cross.style.display = '';
       tip.style.display = 'block';
-      tip.innerHTML = `<b>${esc(fmtDateTime(snaps[best].ts))}</b>Followers: ${fmtNum(f[best])}<br>Following: ${fmtNum(g[best])}`;
+      tip.innerHTML = `<b>${esc(fmtDateTime(snaps[best].ts))}</b>Followers: ${fmtNum(f[best])}<br>Following: ${fmtNum(g[best])}<br>Not following back: ${fmtNum(nfb[best])}`;
       const left = (x(best) / W) * r.width;
       tip.style.left = Math.min(r.width - tip.offsetWidth - 4, Math.max(0, left + 10)) + 'px';
       tip.style.top = '30px';
@@ -1592,7 +1705,10 @@ function renderSettings() {
       <div class="field"><div><div class="lbl">Automatic scans</div><div class="desc">Runs in a background Instagram tab and closes it afterwards. You need to stay logged in.</div></div>
         <select data-setting="autoScanHours">${[[0, 'Off'], [6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every day'], [72, 'Every 3 days'], [168, 'Every week']].map(([v, l]) => `<option value="${v}" ${Number(s.autoScanHours) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       ${chk('notify', 'Notify me when a scan finishes', 'A system notification with the number of new and lost followers.')}
+      <div class="field"><div><div class="lbl">Scan speed</div><div class="desc">Sets the pause, the number of pages fetched at once, and whether both lists run together. Gentle if Instagram keeps pushing back, fast for small accounts.</div></div>
+        <select data-setting="scanPreset">${[['gentle', 'Gentle'], ['normal', 'Normal'], ['fast', 'Fast'], ['custom', 'Custom (values below)']].map(([v, l]) => `<option value="${v}" ${s.scanPreset === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       ${chk('parallelLists', 'Fetch followers and following at the same time', 'About twice as fast. Turn off if Instagram keeps pushing back.')}
+      ${num('scanWorkers', 'Pages fetched at once per list', 'Only when Instagram pages by offset, which it usually does. All requests still share one pause.', 'min="1" max="6"')}
       ${num('pageSize', 'Following: accounts per request', 'The scan tries this first and steps down to 100, 50 or 25 if Instagram refuses.', 'min="25" max="200" step="25"')}
       ${num('followersPageSize', 'Followers: accounts per request', 'Instagram answers followers requests slowly at big sizes, so 50 is usually fastest overall.', 'min="25" max="200" step="25"')}
       ${num('delayMin', 'Starting pause between requests (ms)', 'The scan starts here and speeds up a little after each success, then backs off toward the maximum when Instagram pushes back.', 'min="100" max="10000" step="50"')}
@@ -1605,6 +1721,8 @@ function renderSettings() {
     </div>
     <div class="card">
       <h2>Bios and follower counts</h2>
+      <div class="field"><div><div class="lbl">Loading speed</div><div class="desc">Profiles load in a useful order: people who do not follow you back first, then fans, then mutuals.</div></div>
+        <select data-setting="bioPreset">${[['gentle', 'Gentle, about 40 a minute'], ['normal', 'Normal, about 120 a minute'], ['fast', 'Fast, about 300 a minute'], ['custom', 'Custom (values below)']].map(([v, l]) => `<option value="${v}" ${s.bioPreset === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       ${chk('autoBios', 'Load profiles automatically after each scan', 'Fetches bio and counts for accounts that do not have them yet, in the background, after a manual scan finishes.')}
       ${num('bioConcurrency', 'Profile requests at once', 'One is safe. Two is faster but on accounts with a few thousand people it trips Instagram\'s rate limit, which then also blocks unfollows for a few minutes.', 'min="1" max="4"')}
       ${num('bioDelay', 'Pause between profile requests (ms)', '', 'min="200" max="10000" step="50"')}
@@ -1616,6 +1734,7 @@ function renderSettings() {
     <div class="card">
       <h2>Follow and unfollow actions</h2>
       <div class="callout warn">Instagram blocks accounts that follow or unfollow too quickly. Most people can do a few dozen a day without trouble. Keep the pause long and the batches small.</div>
+      ${num('dailyActionCap', 'Follow and unfollow actions per 24 hours', 'The extension refuses to go past this. Sixty is a safe ceiling for most accounts; brand new accounts should stay under twenty.', 'min="5" max="500"')}
       ${num('actionDelay', 'Seconds between actions', 'Applies to batch actions. Single clicks run right away.', 'min="3" max="120"')}
       ${num('maxActions', 'Maximum actions per batch', 'A batch stops after this many, and immediately if Instagram pushes back.', 'min="1" max="200"')}
     </div>
@@ -1677,20 +1796,22 @@ async function importExportFiles(files) {
   const out = document.getElementById('exportResult');
   const say = (t) => { if (out) out.textContent = t; };
   say('Reading files');
-  const followers = [], following = [];
+  const followers = [], following = [], pending = [];
   const isFollowers = (n) => /(^|\/)followers(_\d+)?\.json$/i.test(n);
   const isFollowing = (n) => /(^|\/)following\.json$/i.test(n);
+  const isPending = (n) => /(^|\/)pending_follow_requests\.json$/i.test(n);
   const take = (name, text) => {
     let json;
     try { json = JSON.parse(text); } catch { return; }
     const entries = parseExportEntries(json);
     if (isFollowers(name)) followers.push(...entries);
     else if (isFollowing(name)) following.push(...entries);
+    else if (isPending(name)) pending.push(...entries);
   };
   try {
     for (const f of files) {
       if (/\.zip$/i.test(f.name)) {
-        const entries = await readZipEntries(await f.arrayBuffer(), (n) => isFollowers(n) || isFollowing(n));
+        const entries = await readZipEntries(await f.arrayBuffer(), (n) => isFollowers(n) || isFollowing(n) || isPending(n));
         for (const e of entries) take(e.name, e.text);
       } else {
         take(f.name, await f.text());
@@ -1702,11 +1823,11 @@ async function importExportFiles(files) {
   }
   if (!followers.length && !following.length) { say('No followers or following files found. Make sure you chose the JSON format when downloading.'); return; }
   S.ignoreUntil = Date.now() + 3000;
-  const r = await importDataExport(S.uid, { followers, following });
+  const r = await importDataExport(S.uid, { followers, following, pending });
   await loadAll();
   renderNav();
   renderMain();
-  const msg = `Matched ${fmtNum(r.matchedF)} of ${fmtNum(r.totalF)} followers and ${fmtNum(r.matchedG)} of ${fmtNum(r.totalG)} following. Updated dates for ${fmtNum(r.updated)} accounts.`;
+  const msg = `Matched ${fmtNum(r.matchedF)} of ${fmtNum(r.totalF)} followers and ${fmtNum(r.matchedG)} of ${fmtNum(r.totalG)} following. Updated dates for ${fmtNum(r.updated)} accounts.${r.pending ? ` Found ${fmtNum(r.pending)} follow requests you have sent; see the Requests page.` : ''}`;
   const out2 = document.getElementById('exportResult');
   if (out2) out2.textContent = msg;
   toast('Dates updated from your Instagram export');
@@ -1740,6 +1861,35 @@ async function onMainClick(e) {
     case 'resetScan': await sendBg({ type: 'resetScan' }); break;
     case 'dismissBanner': S.bannerDismissed = S.scanState?.finishedAt || S.scanState?.startedAt; renderScanBanner(); break;
     case 'dismissThrottle': S.throttleDismissed = S.throttle?.at; renderScanBanner(); break;
+    case 'dismissLogin': S.loginDismissed = true; renderLoginBanner(); break;
+    case 'density': {
+      try { localStorage.setItem('igfi.density', densityCompact() ? 'comfortable' : 'compact'); } catch {}
+      applyDensity();
+      btn.classList.toggle('on', densityCompact());
+      break;
+    }
+    case 'wlVerified': case 'wlBig': {
+      const pks = wlCandidates().filter((pk) => (act === 'wlVerified' ? S.users[pk]?.v : (S.users[pk]?.fc ?? 0) >= 100000));
+      if (!pks.length) { toast('Nobody to add', 'warn'); break; }
+      for (const p of pks) S.wl.add(p);
+      await persistWl();
+      toast(`${fmtNum(pks.length)} added to the whitelist`);
+      refreshWhitelist();
+      break;
+    }
+    case 'cancelSent': {
+      const p = btn.dataset.pk;
+      if (!p) break;
+      btn.disabled = true; btn.textContent = 'Working';
+      const r = await sendBg({ type: 'action', action: 'unfollow', pk: p });
+      if (!r?.ok) { toast(`Could not cancel: ${r?.error || 'unknown error'}`, 'error', 7000); btn.disabled = false; btn.textContent = 'Cancel request'; break; }
+      S.sent = (S.sent || []).filter((x) => x.pk !== p);
+      S.ignoreUntil = Date.now() + 1500;
+      await chrome.storage.local.set({ [`pending_${S.uid}`]: S.sent });
+      toast('Request cancelled');
+      renderRequests();
+      break;
+    }
     case 'more': S.limit += PAGE; S.route === 'changes' ? renderChanges() : renderListBody(S.route === 'groups' ? 'tag' : S.route); break;
     case 'logMore': S.logLimit += 150; renderMain(); break;
     case 'logFilter': S.logFilter = btn.dataset.k; renderMain(); break;
@@ -1958,11 +2108,11 @@ async function onMainChange(e) {
     renderBulkbar();
     return;
   }
-  if (t.id === 'sort') { S.sort = t.value; S.limit = PAGE; renderListBody(kind); return; }
-  if (t.id === 'tagFilter') { S.tagFilter = t.value; S.limit = PAGE; renderListBody(kind); return; }
-  if (t.id === 'fVerified') { S.filters.verified = t.checked; S.limit = PAGE; renderListBody(kind); return; }
-  if (t.id === 'fPrivate') { S.filters.private = t.checked; S.limit = PAGE; renderListBody(kind); return; }
-  if (t.id === 'fShowWl') { S.filters.showWl = t.checked; S.limit = PAGE; renderListBody(kind); renderNav(); return; }
+  if (t.id === 'sort') { S.sort = t.value; S.limit = PAGE; rememberView(); renderListBody(kind); return; }
+  if (t.id === 'tagFilter') { S.tagFilter = t.value; S.limit = PAGE; rememberView(); renderListBody(kind); return; }
+  if (t.id === 'fVerified') { S.filters.verified = t.checked; S.limit = PAGE; rememberView(); renderListBody(kind); return; }
+  if (t.id === 'fPrivate') { S.filters.private = t.checked; S.limit = PAGE; rememberView(); renderListBody(kind); return; }
+  if (t.id === 'fShowWl') { S.filters.showWl = t.checked; S.limit = PAGE; rememberView(); renderListBody(kind); renderNav(); return; }
   if (t.id === 'fromSel' || t.id === 'toSel') {
     setParams({ from: document.getElementById('fromSel').value, to: document.getElementById('toSel').value });
     return;
@@ -2006,7 +2156,13 @@ async function onMainChange(e) {
     if (key === 'delayMax' && val < S.settings.delayMin) val = S.settings.delayMin;
     if (key === 'delayMin' && val > S.settings.delayMax) { await saveSettings({ delayMax: val }); }
     S.ignoreUntil = Date.now() + 1000;
-    S.settings = await saveSettings({ [key]: val });
+    let patch = { [key]: val };
+    if (key === 'scanPreset' && SCAN_PRESETS[val]) patch = { ...patch, ...SCAN_PRESETS[val] };
+    if (key === 'bioPreset' && BIO_PRESETS[val]) patch = { ...patch, ...BIO_PRESETS[val] };
+    if (['delayMin', 'delayMax', 'scanWorkers', 'parallelLists'].includes(key)) patch.scanPreset = 'custom';
+    if (['bioDelay', 'bioConcurrency'].includes(key)) patch.bioPreset = 'custom';
+    S.settings = await saveSettings(patch);
+    if (key === 'scanPreset' || key === 'bioPreset') { renderMain(); }
     if (key === 'autoScanHours') sendBg({ type: 'rescheduleAutoScan' });
     if (key === 'theme') applyTheme();
     if (key === 'maxSnapshots' || key === 'waitDays') renderNav();
@@ -2096,8 +2252,24 @@ function twoStep(btn, fn) {
   }, 4000));
 }
 
+async function budgetLeft() {
+  return actionBudget(S.uid, Math.max(1, Number(S.settings.dailyActionCap) || 60));
+}
+
+async function renderBudgetLine() {
+  const line = document.getElementById('budgetLine');
+  if (!line) return;
+  const b = await budgetLeft();
+  line.innerHTML = `<b class="${b.left <= 5 ? 'low' : ''}">${fmtNum(b.left)}</b> of ${fmtNum(b.cap)} actions left today`;
+}
+
 async function singleAction(action, pk) {
   const name = S.users[pk]?.u || pk;
+  const b = await budgetLeft();
+  if (b.left <= 0) {
+    toast(`You have used all ${b.cap} follow and unfollow actions for the last 24 hours. The next one frees up ${b.oldest ? relTime(b.oldest + 24 * 3600 * 1000).replace(' ago', '') : 'later'}. Raise the cap in Settings if you are sure.`, 'warn', 9000);
+    return false;
+  }
   const r = await sendBg({ type: 'action', action, pk });
   if (!r?.ok) {
     toast(`Could not ${action} @${name}. ${r?.error || 'Unknown error'}`, 'error', r?.blocked ? 12000 : 7000);
@@ -2105,6 +2277,8 @@ async function singleAction(action, pk) {
     return false;
   }
   await applyAndPatch(action, pk);
+  await recordAction(S.uid);
+  renderBudgetLine();
   toast(`${action === 'unfollow' ? 'Unfollowed' : 'Now following'} @${name}`);
   return true;
 }
@@ -2149,13 +2323,15 @@ function patchMainRow(pk, row) {
 
 async function runBatch(action, pks) {
   if (!pks.length) { toast('Nothing to do for the selected accounts', 'warn'); return; }
-  const cap = Math.max(1, Number(S.settings.maxActions) || 25);
+  const budget = await budgetLeft();
+  if (budget.left <= 0) { toast(`You have used all ${budget.cap} follow and unfollow actions for the last 24 hours. Raise the cap in Settings if you are sure.`, 'warn', 9000); return; }
+  const cap = Math.min(Math.max(1, Number(S.settings.maxActions) || 25), budget.left);
   const capped = pks.slice(0, cap);
   const verb = action === 'unfollow' ? 'Unfollow' : 'Follow';
   const delaySec = Math.max(3, Number(S.settings.actionDelay) || 12);
   const m = openModal(`
     <h3>${verb} ${fmtNum(capped.length)} account${capped.length === 1 ? '' : 's'}</h3>
-    ${pks.length > cap ? `<div class="callout warn">Only the first ${cap} of ${fmtNum(pks.length)} selected will run in this batch. Raise the limit in Settings if you want more.</div>` : ''}
+    ${pks.length > cap ? `<div class="callout warn">Only the first ${cap} of ${fmtNum(pks.length)} selected will run in this batch${budget.left < (Number(S.settings.maxActions) || 25) ? `, because ${fmtNum(budget.left)} of your ${fmtNum(budget.cap)} daily actions are left` : ''}. Raise the limits in Settings if you want more.</div>` : `<div class="muted small" style="margin-bottom:8px">${fmtNum(budget.left)} of ${fmtNum(budget.cap)} daily actions left before this batch.</div>`}
     <p>Instagram blocks accounts that follow or unfollow too fast. This runs one action about every ${delaySec} seconds and stops as soon as Instagram pushes back. Keep the Instagram tab open until it finishes.</p>
     <div class="progress"><div class="bar" id="bbar"></div></div>
     <div class="status" id="bstatus">Ready when you are.</div>
@@ -2180,6 +2356,7 @@ async function runBatch(action, pks) {
         ok++;
         log.insertAdjacentHTML('afterbegin', `<div class="ok">${verb}ed @${esc(name)}</div>`);
         await applyAndPatch(action, pk);
+        await recordAction(S.uid);
       } else {
         failed++;
         log.insertAdjacentHTML('afterbegin', `<div class="bad">@${esc(name)}: ${esc(r?.error || 'failed')}</div>`);
@@ -2207,6 +2384,7 @@ async function runBatch(action, pks) {
     S.sel.clear();
     main.querySelectorAll('.sel').forEach((c) => { c.checked = false; });
     renderBulkbar();
+    renderBudgetLine();
   });
 }
 

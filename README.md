@@ -15,7 +15,7 @@ The dashboard opens on its own after install. You can always get back to it from
 
 1. Log in to instagram.com in Chrome.
 2. Click the extension icon, then **Scan now**. If no Instagram tab is open, one opens in the background.
-3. Wait for the scan to finish. A few thousand accounts take well under a minute. The scan asks for 200 accounts per request, fetches followers and following at the same time, and paces itself: it speeds up while Instagram is happy and backs off the moment Instagram pushes back.
+3. Wait for the scan to finish. The scan fetches followers and following at the same time, and when Instagram pages by offset (it usually does) it pulls several pages of each at once, all sharing one pause so the total rate stays sane. It speeds up while Instagram is happy and backs off the moment Instagram pushes back. Settings has Gentle, Normal and Fast presets.
 
 While a scan runs, a panel at the top of the dashboard shows which step it is on, how many accounts have come back, how many requests have gone to Instagram, the pace, the time elapsed, an estimate of the time remaining, and any pauses Instagram forced. The popup shows the short version.
 
@@ -32,11 +32,17 @@ Scan again whenever you like. Every scan is compared with the previous one, so f
 - **Quick check** (off by default): if Instagram's two counters are exactly what they were last time, reuse the last lists instead of fetching. Fast, but it can miss a change that nets to zero.
 - **Whitelist** for accounts you want to keep regardless. They're hidden from Not following back and skipped by bulk unfollows. Start typing a username or name and pick from the suggestions, or use the star on any row.
 - **Suggested whitelist**: the Whitelist page ranks the accounts you follow that don't follow back by how many followers they have, since popular accounts rarely follow back. Click Load counts once, set a minimum follower count, then add them one at a time or all at once.
-- **Bios and follower counts** for everyone. After each scan the extension loads the bio, website, category, and follower, following and post counts for any account that doesn't have them yet, in the background, two at a time. The Overview shows how far along it is. You can also load them for the rows on screen with **Load bios**, or one person at a time. Once loaded, search matches bio text (try a school name) and you can sort by most or fewest followers.
+- **Bios and follower counts** for everyone. After each scan the extension loads the bio, website, category, and follower, following and post counts for any account that doesn't have them yet, in the background, in a useful order: people who don't follow you back first, then fans, then mutuals. Gentle, Normal and Fast presets in Settings. The Overview shows how far along it is. You can also load them for the rows on screen with **Load bios**, or one person at a time. Once loaded, search matches bio text (try a school name) and you can sort by most or fewest followers.
 - **Unfollowed or deactivated?** When someone disappears from your followers, the scan checks whether the account still exists, so the Changes page can say "really unfollowed" or "account gone" (deactivated, deleted, suspended, or they blocked you).
 - **Waiting room**: people you followed at least N days ago (14 by default) who still haven't followed back, sorted by who has kept you waiting longest. One-click unfollow.
 - **Groups and notes**: tag anyone (college, hometown, work) and add a note. Add people by hand with a typeahead, from a row's menu, or by selecting rows and tagging them in bulk. Filter any list by group, or build a group from keywords: choose whether to search bios, full names, usernames or any combination, optionally match whole words only so MIT does not catch smith, and see exactly who would be tagged before you commit.
-- **Follow requests**: see who is waiting to follow a private account and accept or decline from the dashboard.
+- **Follow requests**: see who is waiting to follow a private account and accept or decline from the dashboard. Import your data export and the requests you have sent show up too, with a cancel button.
+- **Find anyone**: the search box in the sidebar (or press `/`) searches everyone the extension has ever seen, including people who have since left.
+- **Follow-back rate**: the Overview shows what share of the people you followed in the last 30 days have followed you back, and the trend chart has a line for how many people are not following you back.
+- **Daily action budget**: follow and unfollow actions are capped per rolling 24 hours (60 by default). The selection bar shows how many are left, and batches stop at the cap.
+- **Quick whitelist**: one click to whitelist every verified account you follow, or everyone with 100K+ followers.
+- **The pill on Instagram** now also shows their follower count, your groups for them, your note, and whether they are whitelisted.
+- **Compact rows** (the ☰ button in any toolbar), a toolbar that stays put while you scroll, sort and filter choices remembered per page, and keyboard shortcuts: `/` focuses search, `Esc` closes menus and dialogs.
 - **Mutual friends** with any account: fetches their followers (up to 5,000) and shows which of them follow you or are followed by you.
 - **Instagram data export import**: Instagram's own export has the real dates people followed you. Drop the zip into Settings and every "since" date becomes exact, which also makes the waiting room accurate.
 - **Follow and unfollow** from any row, one at a time or in a batch with a long pause between actions.

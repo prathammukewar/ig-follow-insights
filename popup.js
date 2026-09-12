@@ -4,18 +4,23 @@ import { esc, fmtNum, relTime, initials, fmtDuration } from './lib/util.js';
 const app = document.getElementById('app');
 let state = null;
 
-async function load() {
+// Snapshots can be several megabytes, so read them once and only again when they change.
+const cache = { uid: null, snaps: null, wl: null };
+
+async function load(changedKeys = null) {
   const g = await chrome.storage.local.get([KEYS.accounts, KEYS.active, KEYS.scanState, KEYS.bioState]);
   const accounts = g[KEYS.accounts] || {};
   const uid = g[KEYS.active] && accounts[g[KEYS.active]] ? g[KEYS.active] : Object.keys(accounts)[0] || null;
   const settings = await getSettings();
-  let snaps = [], wl = [];
-  if (uid) {
+  const needLists = uid && (cache.uid !== uid || cache.snaps == null || !changedKeys
+    || changedKeys.includes(KEYS.snapshots(uid)) || changedKeys.includes(KEYS.whitelist(uid)));
+  if (needLists) {
     const d = await chrome.storage.local.get([KEYS.snapshots(uid), KEYS.whitelist(uid)]);
-    snaps = d[KEYS.snapshots(uid)] || [];
-    wl = d[KEYS.whitelist(uid)] || [];
+    cache.uid = uid;
+    cache.snaps = d[KEYS.snapshots(uid)] || [];
+    cache.wl = d[KEYS.whitelist(uid)] || [];
   }
-  state = { uid, account: uid ? accounts[uid] : null, snaps, wl: new Set(wl), scanState: g[KEYS.scanState] || null, bioState: g[KEYS.bioState] || null, settings };
+  state = { uid, account: uid ? accounts[uid] : null, snaps: uid ? cache.snaps : [], wl: new Set(uid ? cache.wl : []), scanState: g[KEYS.scanState] || null, bioState: g[KEYS.bioState] || null, settings };
   const t = settings.theme;
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   render();
@@ -91,7 +96,7 @@ app.addEventListener('click', async (e) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local') load();
+  if (area === 'local') load(Object.keys(changes));
 });
 
 setInterval(() => { if (state?.scanState?.status === 'running' || state?.bioState?.status === 'running') render(); }, 1000);

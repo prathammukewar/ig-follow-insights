@@ -368,9 +368,64 @@
       const next = json.next_max_id;
       if (users.length === 0) emptyPages++; else emptyPages = 0;
       if (!next || next === maxId || emptyPages >= 2) break;
+      // When Instagram's cursor is a plain offset, the remaining pages do not depend on each
+      // other, so several can be fetched at once (all sharing the one pacer).
+      const workers = Math.min(6, Math.max(1, Number(settings.scanWorkers) || 3));
+      if (!maxId && !order && workers > 1 && /^\d+$/.test(String(next)) && Number(next) === users.length && expected > users.length * 2) {
+        await fetchOffsets(kind, uid, expected, users.length, variants[vIdx], { pacer, ctl, out, seen, strm, label, startCount, workers });
+        return out;
+      }
       maxId = String(next);
     }
     return out;
+  }
+
+  async function fetchOffsets(kind, uid, expected, size, v, { pacer, ctl, out, seen, strm, label, startCount, workers }) {
+    const offsets = [];
+    for (let o = size; o < expected + size; o += size) offsets.push(o);
+    let stop = false;
+    let failures = 0;
+    const style = styleById(v.style);
+    const worker = async () => {
+      while (!stop && offsets.length) {
+        if (ctl?.cancel) throw new ScanError('Scan cancelled.', true);
+        const o = offsets.shift();
+        let json;
+        try {
+          json = await getJson(listPath(uid, kind, v, String(o), null), { pacer, ctl, style, sampleKind: kind });
+        } catch (e) {
+          if (e.fatal) throw e;
+          failures++;
+          if (failures > 3) { stop = true; throw e; }
+          offsets.unshift(o);
+          await sleep(3000);
+          continue;
+        }
+        const users = Array.isArray(json.users) ? json.users : [];
+        if (!users.length) { if (o >= expected) stop = true; continue; }
+        for (const u of users) {
+          const m = mapUser(u);
+          if (!m.pk || seen.has(m.pk)) continue;
+          seen.add(m.pk);
+          out.push(m);
+        }
+        if (state.prog) {
+          state.prog.pages++;
+          state.prog[kind === 'followers' ? 'fFound' : 'gFound'] = out.length;
+          state.prog.throttles = pacer ? pacer.throttled : state.prog.throttles;
+          if (strm) { strm.pages++; strm.found = out.length; }
+        }
+        await writeState({
+          ...progressFields(),
+          phase: state.prog?.parallel ? 'lists' : kind,
+          deep: false,
+          message: listMessage(kind, out.length, expected, label),
+          done: out.length,
+          total: expected || 0,
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: workers }, worker));
   }
 
   // Try the list request in every shape and style once, and keep the answers so a failing scan
@@ -909,12 +964,19 @@
           this.uid = cookie('ds_user_id') || activeAccount || null;
           if (!this.enabled || !this.uid) { this.byName = new Map(); this.scanTs = 0; this.render(true); return; }
           this.ownName = accounts?.[this.uid]?.username || '';
-          const g = await chrome.storage.local.get([`users_${this.uid}`, `snapshots_${this.uid}`]);
+          const g = await chrome.storage.local.get([`users_${this.uid}`, `snapshots_${this.uid}`, `tags_${this.uid}`, `whitelist_${this.uid}`]);
           const users = g[`users_${this.uid}`] || {};
           const snaps = g[`snapshots_${this.uid}`] || [];
           const snap = snaps[snaps.length - 1];
           this.byName = new Map();
-          for (const [pk, r] of Object.entries(users)) if (r.u) this.byName.set(r.u.toLowerCase(), pk);
+          this.info = new Map();
+          const tags = g[`tags_${this.uid}`] || {};
+          const wl = new Set(g[`whitelist_${this.uid}`] || []);
+          for (const [pk, r] of Object.entries(users)) {
+            if (!r.u) continue;
+            this.byName.set(r.u.toLowerCase(), pk);
+            this.info.set(pk, { fc: r.fc ?? null, tags: tags[pk]?.t || [], note: tags[pk]?.n || '', wl: wl.has(pk) });
+          }
           this.followers = new Set(snap?.followers || []);
           this.following = new Set(snap?.following || []);
           this.scanTs = snap?.ts || 0;
@@ -957,13 +1019,25 @@
         });
       }
       this.el.className = cls;
-      this.el.innerHTML = `<span class="igfi-dot"></span><span class="igfi-text"><b>@${escapeHtml(name)}</b> ${escapeHtml(label)}<small>as of ${escapeHtml(ago)}</small></span><button class="igfi-x" title="Hide">&times;</button>`;
+      const info = (pk && this.info?.get(pk)) || null;
+      const extras = [];
+      if (info?.fc != null) extras.push(fmtCountShort(info.fc) + ' followers');
+      if (info?.tags?.length) extras.push(info.tags.join(', '));
+      if (info?.wl) extras.push('whitelisted');
+      if (info?.note) extras.push('note: ' + (info.note.length > 40 ? info.note.slice(0, 37) + '…' : info.note));
+      this.el.innerHTML = `<span class="igfi-dot"></span><span class="igfi-text"><b>@${escapeHtml(name)}</b> ${escapeHtml(label)}${extras.length ? `<small>${escapeHtml(extras.join(' · '))}</small>` : ''}<small>as of ${escapeHtml(ago)}</small></span><button class="igfi-x" title="Hide">&times;</button>`;
       if (!this.el.isConnected) document.body.appendChild(this.el);
     },
     remove() {
       if (this.el && this.el.isConnected) this.el.remove();
     },
   };
+
+  function fmtCountShort(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e4) return Math.round(n / 1e3) + 'K';
+    return Number(n).toLocaleString();
+  }
 
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -984,7 +1058,7 @@
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     const keys = Object.keys(changes);
-    if (keys.some((k) => k === 'settings' || k === 'activeAccount' || k === 'accounts' || k.startsWith('users_') || k.startsWith('snapshots_'))) {
+    if (keys.some((k) => k === 'settings' || k === 'activeAccount' || k === 'accounts' || k.startsWith('users_') || k.startsWith('snapshots_') || k.startsWith('tags_') || k.startsWith('whitelist_'))) {
       badge.reload();
     }
   });

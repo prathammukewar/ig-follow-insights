@@ -20,6 +20,7 @@
   --warn-bg: #fff3d6;
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  --series-3: #1baf7a;
   --radius: 12px;
   --shadow: 0 1px 2px rgba(16, 20, 30, 0.05), 0 1px 8px rgba(16, 20, 30, 0.04);
   --sidebar-w: 248px;
@@ -45,6 +46,7 @@
     --warn-bg: #3a2c10;
     --series-1: #3987e5;
     --series-2: #d95926;
+    --series-3: #199e70;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
 }
@@ -68,6 +70,7 @@
   --warn-bg: #3a2c10;
   --series-1: #3987e5;
   --series-2: #d95926;
+  --series-3: #199e70;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
@@ -205,6 +208,7 @@ a.tile:hover { text-decoration: none; border-color: var(--muted); }
 .icon-btn.star.on { color: #e6a700; }
 
 .toolbar {
+  position: sticky; top: 0; z-index: 15;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px 12px; margin-bottom: 10px; box-shadow: var(--shadow);
@@ -404,3 +408,27 @@ table.hist tr:last-child td { border-bottom: 0; }
   .field { grid-template-columns: 1fr; }
   .field input[type="checkbox"] { justify-self: start; }
 }
+
+/* Global search in the sidebar */
+.side-search { padding: 0 14px 10px; }
+.side-search input { width: 100%; padding: 8px 11px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); font-size: 13px; }
+
+/* Compact density */
+body.compact .row { padding: 6px 12px; gap: 10px; grid-template-columns: 24px 34px 1fr auto; }
+body.compact .avatar:not(.sm) { width: 34px; height: 34px; font-size: 12px; }
+body.compact .line2 { display: none; }
+body.compact .bio { -webkit-line-clamp: 1; padding: 3px 7px; font-size: 12px; }
+body.compact .bio-meta, body.compact .bio-link { display: none; }
+body.compact .since { display: none; }
+body.compact .btn.sm { padding: 3px 8px; font-size: 12px; }
+.icon-btn.on { color: var(--info); background: var(--info-bg); }
+
+/* Loading state before data arrives */
+.skeleton { padding: 40px; color: var(--muted); text-align: center; }
+.skeleton .bar { height: 12px; border-radius: 6px; background: var(--surface-3); margin: 10px auto; max-width: 420px; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+/* Keyboard hint */
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-3); border-radius: 4px; padding: 1px 5px; border: 1px solid var(--border); }
+.budget { font-size: 12.5px; color: var(--text-2); }
+.budget b.low { color: var(--danger); }

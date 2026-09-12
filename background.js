@@ -1,4 +1,4 @@
-import { KEYS, getSettings, saveScan, mergeUserFields } from './lib/store.js';
+import { KEYS, getSettings, saveScan, mergeUserFields, prioritizeForProfiles } from './lib/store.js';
 
 const IG_HOME = 'https://www.instagram.com/';
 const STALE_MS = 3 * 60 * 1000;
@@ -267,7 +267,10 @@ async function autoLoadProfiles(data, sender) {
   const uid = String(data.userId);
   const g = await chrome.storage.local.get(KEYS.users(uid));
   const users = g[KEYS.users(uid)] || {};
-  const pks = [...new Set([...(data.followers || []), ...(data.following || [])].map((u) => u.pk))].filter((pk) => !users[pk]?.bioAt);
+  const fl = (data.followers || []).map((u) => u.pk), gl = (data.following || []).map((u) => u.pk);
+  const wlKey = KEYS.whitelist(uid);
+  const wl = new Set((await chrome.storage.local.get(wlKey))[wlKey] || []);
+  const pks = prioritizeForProfiles([...new Set([...fl, ...gl])].filter((pk) => !users[pk]?.bioAt), fl, gl, wl);
   if (!pks.length) return;
   try { await chrome.tabs.sendMessage(tabId, { type: 'loadProfiles', pks, settings }); } catch {}
 }
