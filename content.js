@@ -372,8 +372,16 @@
       // other, so several can be fetched at once (all sharing the one pacer).
       const workers = Math.min(6, Math.max(1, Number(settings.scanWorkers) || 3));
       if (!maxId && !order && workers > 1 && /^\d+$/.test(String(next)) && Number(next) === users.length && expected > users.length * 2) {
-        await fetchOffsets(kind, uid, expected, users.length, variants[vIdx], { pacer, ctl, out, seen, strm, label, startCount, workers });
-        return out;
+        try {
+          await fetchOffsets(kind, uid, expected, users.length, variants[vIdx], { pacer, ctl, out, seen, strm, label, startCount, workers });
+          return out;
+        } catch (e) {
+          if (e.fatal) throw e;
+          // Offset paging did not take. Carry on one page at a time from where it stopped.
+          await writeState({ ...progressFields(), message: `Fetching ${kind} one page at a time (${e?.message || e})` });
+          maxId = String(out.length);
+          continue;
+        }
       }
       maxId = String(next);
     }
@@ -591,6 +599,29 @@
     return out;
   }
 
+  // Does this account still exist? This is what separates "they unfollowed you" from
+  // "the account is deactivated, deleted, suspended, or they blocked you".
+  async function accountStatus(pk, pacer, ctl) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (ctl?.cancel) return 'unknown';
+      if (pacer) await pacer.wait();
+      let r;
+      try { r = await request(`/api/v1/users/${pk}/info/`); } catch { return 'unknown'; }
+      if (r.status === 200 && r.json?.user) { pacer?.success(); return 'active'; }
+      if (r.status === 404) return 'gone';
+      const msg = (r.json && r.json.message) || '';
+      if (isThrottle(r, msg)) {
+        pacer?.throttle();
+        noteThrottle('scan');
+        if (state.prog) state.prog.throttles++;
+        await sleep(20000 * (attempt + 1));
+        continue;
+      }
+      return 'unknown';
+    }
+    return 'unknown';
+  }
+
   // ---------- the scan ----------
 
   async function runScan(settings) {
@@ -658,6 +689,7 @@
       try { const { accounts } = await chrome.storage.local.get('accounts'); prevDeep = accounts?.[uid]?.deep || null; } catch {}
       const deep = { ...(prevDeep || {}) };
       const lists = [['followers', followers, expectedF, 'f'], ['following', following, expectedG, 'g']];
+      try {
       for (const [kind, list, expected, k] of lists) {
         const short = expected ? expected - list.length : 0;
         if (settings.deepScan === false || !expected || short <= Math.max(2, expected * 0.005)) continue;
@@ -671,9 +703,14 @@
         deep[k + 'Short'] = expected - list.length;
         deep.at = Date.now();
       }
+      } catch (e) {
+        if (e instanceof ScanError && /cancelled/i.test(e.message)) throw e;
+        deep.error = String(e?.message || e);
+      }
 
       // Who disappeared since the last scan? Check whether those accounts still exist.
       let gone = null;
+      try {
       if (settings.verifyLost !== false) {
         let prev = null;
         try { const g = await chrome.storage.local.get(`snapshots_${uid}`); const snaps = g[`snapshots_${uid}`] || []; prev = snaps[snaps.length - 1] || null; } catch {}
@@ -691,6 +728,11 @@
             }
           }
         }
+      }
+      } catch (e) {
+        if (e instanceof ScanError && /cancelled/i.test(e.message)) throw e;
+        // Losing a finished scan over an optional extra step would be absurd.
+        await writeState({ ...progressFields(), message: `Could not check who left (${e?.message || e}). Saving the scan anyway.` });
       }
 
       await writeState({ ...progressFields(), phase: 'saving', deep: false, eta: 0, message: 'Saving results' });
