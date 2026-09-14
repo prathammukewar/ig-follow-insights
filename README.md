@@ -1,89 +1,69 @@
-# Follow Insights for Instagram
+# Follow Insights
 
-A Chrome extension that shows you who doesn't follow you back, who unfollowed you, who is new, and lets you tidy up who you follow. Everything runs in your browser using the Instagram session you are already logged in to. Nothing is sent anywhere else.
+The first time I ran this against my own account, Instagram's profile page said I followed 1,665 people and the list it served me stopped at 1,590. The missing 75 are deactivated, disabled and restricted accounts. Instagram still counts them against you, it just won't show them to you, and it won't show them to itself either: scroll your own following list in the app and you'll run out of names before you hit the number printed at the top of the page.
 
-## Install (unpacked)
+So that's the first thing this extension does. It reads your followers and following lists through the Instagram tab you're already signed in to, keeps a copy in the browser, and diffs each scan against the last one, which is the only way to know who left and roughly when. There's no server. There's nowhere for the data to go.
 
-1. Open Chrome and go to `chrome://extensions`.
-2. Turn on **Developer mode** (top right).
-3. Click **Load unpacked** and pick this folder (`ig-follow-insights`).
-4. Pin the extension from the puzzle icon in the toolbar if you want quick access.
+## Getting it running
 
-The dashboard opens on its own after install. You can always get back to it from the popup or by right clicking the icon and choosing Options.
+Chrome, `chrome://extensions`, Developer mode on, Load unpacked, pick this folder. Pin it if you want the popup one click away. The dashboard opens by itself the first time and lives behind the extension icon after that.
 
-## First scan
+Then log in to instagram.com, hit Scan now, and leave the tab open while it works. It can sit in the background. From the second scan onward you get the interesting half: who followed you since last time, who unfollowed, and whether the ones who vanished actually unfollowed or just deactivated.
 
-1. Log in to instagram.com in Chrome.
-2. Click the extension icon, then **Scan now**. If no Instagram tab is open, one opens in the background.
-3. Wait for the scan to finish. The scan fetches followers and following at the same time, and when Instagram pages by offset (it usually does) it pulls several pages of each at once, all sharing one pause so the total rate stays sane. It speeds up while Instagram is happy and backs off the moment Instagram pushes back. Settings has Gentle, Normal and Fast presets.
+## The parts worth knowing about
 
-While a scan runs, a panel at the top of the dashboard shows which step it is on, how many accounts have come back, how many requests have gone to Instagram, the pace, the time elapsed, an estimate of the time remaining, and any pauses Instagram forced. The popup shows the short version.
+**Not following back** is the list everyone comes for, and on its own it's a bad list, because it puts your friend who forgot and Barack Obama in the same column. So the Whitelist page ranks those accounts by how many followers *they* have and offers to whitelist the top of that list in one click. Whitelisted people disappear from Not following back and bulk unfollows skip them.
 
-Scan again whenever you like. Every scan is compared with the previous one, so from the second scan onward you get a running log of who followed and unfollowed you.
+**The waiting room** is the same idea across time: people you followed more than two weeks ago who still haven't followed back. Instagram's lists don't carry dates, so out of the box this only knows what it's watched happen. Feed it the "Download your information" zip in Settings and every date becomes exact, going back years.
 
-## What you get
+**Bios** get loaded one profile at a time in the background after a scan, worst offenders first. Once they're in, search matches bio text, so typing your school name finds everyone from it, and you can turn that search into a saved group with a preview of who's about to get tagged. Groups also take notes, which is the only way I can remember who half my followers are.
 
-- **Overview**: follower and following counts with changes since the last scan, ratio, and a trend chart.
-- **Not following back**: people you follow who don't follow you. Sort by how recently you followed them.
-- **Fans**: people who follow you that you don't follow back.
-- **Mutual, Followers, Following**: full lists with search, sort and filters for verified and private accounts.
-- **Changes**: new followers, people who unfollowed you, and changes to who you follow. Compare any two scans. Below that, an activity log of everything ever recorded.
-- **History**: a table of every scan with deltas, plus export and delete per scan.
-- **Quick check** (off by default): if Instagram's two counters are exactly what they were last time, reuse the last lists instead of fetching. Fast, but it can miss a change that nets to zero.
-- **Whitelist** for accounts you want to keep regardless. They're hidden from Not following back and skipped by bulk unfollows. Start typing a username or name and pick from the suggestions, or use the star on any row.
-- **Suggested whitelist**: the Whitelist page ranks the accounts you follow that don't follow back by how many followers they have, since popular accounts rarely follow back. Click Load counts once, set a minimum follower count, then add them one at a time or all at once.
-- **Bios and follower counts** for everyone. After each scan the extension loads the bio, website, category, and follower, following and post counts for any account that doesn't have them yet, in the background, in a useful order: people who don't follow you back first, then fans, then mutuals. Gentle, Normal and Fast presets in Settings. The Overview shows how far along it is. You can also load them for the rows on screen with **Load bios**, or one person at a time. Once loaded, search matches bio text (try a school name) and you can sort by most or fewest followers.
-- **Unfollowed or deactivated?** When someone disappears from your followers, the scan checks whether the account still exists, so the Changes page can say "really unfollowed" or "account gone" (deactivated, deleted, suspended, or they blocked you).
-- **Waiting room**: people you followed at least N days ago (14 by default) who still haven't followed back, sorted by who has kept you waiting longest. One-click unfollow.
-- **Groups and notes**: tag anyone (college, hometown, work) and add a note. Add people by hand with a typeahead, from a row's menu, or by selecting rows and tagging them in bulk. Filter any list by group, or build a group from keywords: choose whether to search bios, full names, usernames or any combination, optionally match whole words only so MIT does not catch smith, and see exactly who would be tagged before you commit.
-- **Follow requests**: see who is waiting to follow a private account and accept or decline from the dashboard. Import your data export and the requests you have sent show up too, with a cancel button.
-- **Find anyone**: the search box in the sidebar (or press `/`) searches everyone the extension has ever seen, including people who have since left.
-- **Follow-back rate**: the Overview shows what share of the people you followed in the last 30 days have followed you back, and the trend chart has a line for how many people are not following you back.
-- **Daily action budget**: follow and unfollow actions are capped per rolling 24 hours (60 by default). The selection bar shows how many are left, and batches stop at the cap.
-- **Quick whitelist**: one click to whitelist every verified account you follow, or everyone with 100K+ followers.
-- **The pill on Instagram** now also shows their follower count, your groups for them, your note, and whether they are whitelisted.
-- **Compact rows** (the ☰ button in any toolbar), a toolbar that stays put while you scroll, sort and filter choices remembered per page, and keyboard shortcuts: `/` focuses search, `Esc` closes menus and dialogs.
-- **Mutual friends** with any account: fetches their followers (up to 5,000) and shows which of them follow you or are followed by you.
-- **Instagram data export import**: Instagram's own export has the real dates people followed you. Drop the zip into Settings and every "since" date becomes exact, which also makes the waiting room accurate.
-- **Follow and unfollow** from any row, one at a time or in a batch with a long pause between actions.
-- **Export** any list as CSV or JSON, or copy the usernames.
-- **Profile pill** on instagram.com: open any profile and a small note at the bottom right tells you whether they follow you, based on the last scan.
-- **Automatic scans** on a schedule, with a notification when they finish (off by default, see Settings).
-- **Backup and restore** of all data as a JSON file.
-- **Multiple accounts**: log in to a different Instagram account and scan. Each keeps its own history.
+The rest is less interesting but it's there: mutual friends with any account, follow requests in both directions, CSV and JSON export, scheduled scans, multiple accounts, a pill on every Instagram profile telling you where you stand with that person, and backup to a file.
 
-## Staying out of trouble with Instagram
+## What actually broke
 
-The scan uses the same requests Instagram's own website makes when you open your followers list, spaced out with random pauses. That has been fine in practice, but Instagram does rate limit. If you see "Instagram is rate limiting requests" the scan waits and retries on its own. If it gives up, wait 15 to 30 minutes.
+The scan is the same request instagram.com makes when you open your own followers list, so I assumed it would be boring. It wasn't.
 
-Loading bios means one request per profile. The background loader runs one at a time with a one second pause, roughly 50 profiles a minute, and pauses itself if Instagram rate limits. A few thousand accounts take about an hour the first time; after that only new accounts need loading. Running it faster (Settings) works on small accounts but trips Instagram's limit on big ones, and that limit also blocks unfollows for a few minutes. Bios are cached, so you only pay once per person. Keep the Instagram tab open while it runs (it can be in the background).
+My first version fired about five requests a second because that seemed fast and nothing complained for the first thirty seconds. Then Instagram throttled the whole session, which I could live with, except throttling also breaks unfollows, so I spent a while convinced I'd broken the unfollow button. I hadn't. I'd just been rude.
 
-Following and unfollowing is a different matter. Instagram blocks accounts that do too many of these in a short time, sometimes for a day or more. The defaults (one action every 12 seconds, at most 25 per batch) are conservative. Keep it that way, especially on a newer account. A batch stops the moment Instagram pushes back.
+Worse: at some point Instagram stopped answering `/api/v1/friendships/<id>/followers/` for my account and started returning the login page with a `200 OK`. Following worked fine. Only followers broke, only for that session, and nothing in the response said why. Reading it back out of the extension's own LevelDB on disk was how I finally saw it. So the request now goes down a ladder:
 
-Automated actions may be against Instagram's terms. Use the follow and unfollow features sparingly and at your own risk.
+```
+followers, in the order it tries
+  fetchList      50 per page with search_surface   <- what the site itself sends
+                 50 per page without it
+                 25 per page, both ways
+                 all four again against i.instagram.com
+  fetchOffsets   once any of those answers, pull three pages at a time
+  fetchLearned   if every one is refused: replay whatever observer.js watched
+                 instagram.com send for its own list, cursor handling and all
+```
 
-## Troubleshooting
+That last one is the part I'm actually pleased with. `observer.js` sits in the page and notes the shape of the requests the site makes, so when Instagram changes its endpoint or blocks mine, the extension copies the site's homework instead of me guessing at a new URL. It handles the GraphQL version too, which is where Instagram seems to be moving.
 
-- **"You are not logged in"**: log in on instagram.com in this Chrome profile and scan again.
-- **"Instagram wants you to log in again"**: open the Instagram tab, complete whatever Instagram asks, then rescan.
-- **One list stays at 0 while the other works**: Instagram has stopped answering that endpoint for your session and is returning a web page instead of data. The scan retries in every request shape it knows (different page sizes, with and without the search_surface parameter, a second app id, and the i.instagram.com host). If all of those are refused, open that list on instagram.com, scroll it a little, and come back: the extension watches how the site itself loads the list and copies exactly that request, including the newer GraphQL one. Settings shows whether it has learned each list.
-- **A scan fails or one list stays at 0**: open Settings and click **Run diagnostics**. It asks Instagram for one page of each list in every shape the scan knows and shows exactly what came back, so you can see whether it is rate limiting, a login check, or one particular request shape being refused. The scan itself also tries the shapes in order and sticks with whichever answers.
-- **Unfollow or follow fails**: read the message. "Please wait a few minutes" means Instagram is rate limiting your session, usually because the profile loader or a scan made a lot of requests just before. The dashboard shows a red notice with the time it should clear, and the loader pauses itself. "feedback_required" is different: Instagram has temporarily blocked follow and unfollow actions on the account itself, which also happens when you do it by hand, and it usually lifts within a day.
-- **Scan errors mentioning a page size**: the scan asks Instagram for 200 accounts per request and steps down to 100, 50 or 25 on its own if Instagram refuses. If it keeps failing, lower "Largest page size" in Settings.
-- **Scan seems stuck**: the Instagram tab was probably closed or put to sleep. Click Reset in the sidebar and scan again. Keeping the Instagram tab open (it can be in the background) is enough.
-- **Avatars show initials**: profile picture links from Instagram expire after a while. They refresh on the next scan.
-- **Counts differ from Instagram**: the dashboard shows how many accounts Instagram actually listed, and the Overview shows Instagram's own counter next to it when they differ. The gap is almost always deactivated, disabled or restricted accounts, which Instagram still counts but leaves out of every list (including its own). When a list comes back short, the scan fetches it a second time in a different order and merges anything the first pass skipped. You can turn that off in Settings.
+It still doesn't always work. If Instagram has decided your session doesn't get the followers list today, no extension can talk it out of that, and the honest answer is to wait. Settings has a Diagnostics button that tries every shape once and shows you exactly what came back, including the page title of whatever HTML it got, so at least you can tell "Instagram is annoyed" from "this thing is broken."
+
+## Not getting your account limited
+
+Scanning is cheap and Instagram mostly tolerates it. The scan paces itself, speeds up while things are going well, and backs off the moment it sees a rate limit. Gentle, Normal and Fast presets are in Settings if you'd rather decide yourself.
+
+Following and unfollowing is a different animal. Instagram will block those actions on your account for a day if you do too many too fast, and that's true whether you use this or tap the buttons yourself. The defaults here are one action every twelve seconds, twenty five per batch, and sixty per rolling day, and the extension refuses to go past that last one. New accounts should be well under it. A batch stops the instant Instagram pushes back.
+
+Automating any of this is arguably against Instagram's terms. Unfollow sparingly, and know that it's your account on the line.
+
+## When something's wrong
+
+- **A list stuck at 0 while the other one fills up.** That's the login-page-with-a-200 problem above. Open that list on instagram.com, scroll it a bit so `observer.js` can watch, come back and rescan.
+- **"Please wait a few minutes" on an unfollow.** Rate limiting, usually because the bio loader was running. It clears on its own, and the dashboard shows when.
+- **"feedback_required" on an unfollow.** Different thing: an action block on the account itself. Wait a day, and don't unfollow forty people the moment it lifts.
+- **The scan stops reporting progress.** The Instagram tab got closed or slept. Reset in the sidebar, scan again.
+- **Initials instead of profile pictures.** Instagram's image links expire. The next scan refreshes them.
+- **Counts that don't match Instagram's.** See the top of this file. The Overview shows both numbers side by side when they disagree.
 
 ## Privacy
 
-The extension talks only to instagram.com and Instagram's image CDN. All data lives in Chrome's extension storage on this computer. Delete it any time from Settings.
+Two origins get talked to: instagram.com and Instagram's image CDN. Everything else stays in Chrome's extension storage on your own machine, and Settings has a button that deletes all of it.
 
-## Files
+## The code
 
-- `manifest.json`: extension config (Manifest V3).
-- `background.js`: opens the Instagram tab, kicks off scans, saves results, schedules automatic scans.
-- `content.js`: runs on instagram.com; fetches the lists and shows the profile pill.
-- `observer.js`: runs in the page itself and notes which requests instagram.com uses to load follower lists, so the scan can copy them if its own requests are refused. It records URLs, methods and Instagram's request headers only, never cookies or response contents, and only on instagram.com.
-- `dashboard.*`: the full page dashboard.
-- `popup.*`: the toolbar popup.
-- `lib/store.js`: storage layout and the logic that turns two scans into a list of changes.
+`content.js` does the fetching and draws the profile pill. `observer.js` is the page-world script described above, and it records URLs, methods and Instagram's own request headers, never cookies and never response bodies. `background.js` owns the Instagram tab and the schedule. `lib/store.js` holds the storage layout and the diff that turns two scans into "these four people left." `dashboard.*` and `popup.*` are the UI.

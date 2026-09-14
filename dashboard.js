@@ -57,13 +57,13 @@ const NAV = [
 ];
 
 const LIST_META = {
-  nfb: { title: 'Not following back', sub: 'People you follow who do not follow you.', empty: 'Everyone you follow follows you back.' },
-  waiting: { title: 'Waiting room', sub: '', empty: 'Nobody has been waiting that long. Lower the number of days in Settings to see more.' },
-  fans: { title: 'Fans', sub: 'People who follow you that you do not follow back.', empty: 'You follow back everyone who follows you.' },
+  nfb: { title: 'Not following back', sub: 'People you follow who don\'t follow you.', empty: 'Everyone you follow follows you back.' },
+  waiting: { title: 'Waiting room', sub: '', empty: 'Nobody\'s been waiting that long. Lower the number of days in Settings to see more.' },
+  fans: { title: 'Fans', sub: 'People who follow you that you don\'t follow back.', empty: 'You already follow back everyone who follows you.' },
   mutual: { title: 'Mutual', sub: 'You follow each other.', empty: 'No mutual follows yet.' },
   followers: { title: 'Followers', sub: 'Everyone who follows you, as of the last scan.', empty: 'No followers found in the last scan.' },
-  following: { title: 'Following', sub: 'Everyone you follow, as of the last scan.', empty: 'You are not following anyone.' },
-  whitelist: { title: 'Whitelist', sub: 'People you want to keep following even if they do not follow back. They are hidden from the Not following back list and skipped by bulk unfollows.', empty: 'Your whitelist is empty. Use the star on any row to add someone.' },
+  following: { title: 'Following', sub: 'Everyone you follow, as of the last scan.', empty: 'You\'re not following anyone.' },
+  whitelist: { title: 'Whitelist', sub: 'People you want to keep following even if they don\'t follow back. They are hidden from the Not following back list and skipped by bulk unfollows.', empty: 'Your whitelist is empty. Use the star on any row to add someone.' },
   tag: { title: 'Group', sub: '', empty: 'Nobody in this group yet.' },
   search: { title: 'Search', sub: 'Everyone the extension has ever seen, including people who have since unfollowed or been unfollowed.', empty: 'No one matches.' },
 };
@@ -562,19 +562,19 @@ function renderMain() {
 
 function renderWelcome() {
   main.innerHTML = `
-    <header class="page-head"><div><h1>Welcome</h1><p class="sub">Let's take a first look at your followers.</p></div></header>
+    <header class="page-head"><div><h1>Welcome</h1><p class="sub">Let's see who's actually there.</p></div></header>
     <div class="card">
       <h2>How it works</h2>
-      <p>The extension reads your followers and following lists through the Instagram tab where you are logged in, the same way the website loads them. Nothing leaves your computer. Every scan is saved so later scans can show who unfollowed you and who is new.</p>
+      <p>It reads your followers and following lists through the Instagram tab you're already signed in to, the same way the site does. Nothing leaves your computer, because there's nowhere for it to go. Each scan is kept so the next one can tell you who left.</p>
       <ol class="steps">
-        <li><div><b>Log in to Instagram</b> in this browser. A tab opens in the background if you do not have one.</div></li>
-        <li><div><b>Click Scan now.</b> A few thousand accounts take well under a minute. The scan slows itself down if Instagram pushes back.</div></li>
-        <li><div><b>Scan again every so often.</b> Each scan is compared with the last one to log new followers and unfollowers.</div></li>
+        <li><div><b>Log in to Instagram</b> in this browser. If you don't have a tab open, one opens in the background.</div></li>
+        <li><div><b>Click Scan now.</b> A few thousand accounts take well under a minute. It slows itself down the moment Instagram pushes back.</div></li>
+        <li><div><b>Scan again in a few days.</b> The second scan is where it gets useful: everything after that is a diff.</div></li>
       </ol>
       <div style="margin-top:16px"><button class="btn primary" data-act="scan">Scan now</button></div>
     </div>
     <div class="card info">
-      <b>A note on unfollowing.</b> The dashboard lets you unfollow people one at a time or in small batches. Instagram temporarily blocks accounts that follow or unfollow too fast, so batches run slowly and stop the moment Instagram complains. Use the whitelist for accounts you want to keep no matter what.
+      <b>Before you unfollow anyone.</b> Instagram blocks accounts that follow or unfollow too fast, for a day at a time. Batches here run slowly and stop the moment it complains, and there's a cap on how many you can do per day. Whitelist the people you'd never drop.
     </div>`;
 }
 
@@ -759,7 +759,7 @@ async function loadSingleProfile(pk, btn) {
 function listTitle(kind) {
   if (kind === 'search') return { title: `Search: ${S.params.q || ''}`, sub: LIST_META.search.sub, empty: LIST_META.search.empty };
   if (kind === 'tag') return { title: S.params.tag || 'Group', sub: `Everyone tagged "${S.params.tag}".`, empty: LIST_META.tag.empty };
-  if (kind === 'waiting') return { title: 'Waiting room', sub: `People you followed at least ${S.settings.waitDays} days ago who still have not followed back. Sorted by who has kept you waiting longest.`, empty: LIST_META.waiting.empty };
+  if (kind === 'waiting') return { title: 'Waiting room', sub: `People you followed at least ${S.settings.waitDays} days ago who still haven't followed back, longest wait first.`, empty: LIST_META.waiting.empty };
   return LIST_META[kind];
 }
 
@@ -1047,7 +1047,7 @@ function wlSuggestHTML() {
   const est = Math.max(1, Math.round(missing / perMin));
   return `<div class="card">
     <div class="page-head" style="margin-bottom:10px">
-      <div><h2 style="margin-bottom:2px">Suggested for your whitelist</h2><p class="sub small">Accounts you follow that don't follow back, ranked by how many followers they have. Popular accounts rarely follow back, so these are the ones you probably want to keep.</p></div>
+      <div><h2 style="margin-bottom:2px">Suggested for your whitelist</h2><p class="sub small">Accounts you follow that don't follow back, ranked by how many followers they have. Popular accounts almost never follow back, so these are the ones worth keeping.</p></div>
       <div class="actions"><label class="chk-inline">At least <select id="wlMin">${WL_MIN_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === min ? 'selected' : ''}>${l}</option>`).join('')}</select> followers</label></div>
     </div>
     ${cands.length ? `<div class="line3" style="margin-bottom:10px">
@@ -1308,10 +1308,10 @@ function renderGroups() {
   const names = Object.keys(tags).sort((a, b) => tags[b] - tags[a] || a.localeCompare(b));
   const withBio = allListedPks().filter((pk) => S.users[pk]?.bio).length;
   main.innerHTML = `
-    <header class="page-head"><div><h1>Groups</h1><p class="sub">Tag people so you can filter any list by group. Add a note to remember who someone is.</p></div></header>
+    <header class="page-head"><div><h1>Groups</h1><p class="sub">Tag people so you can filter any list by group. The notes are for when you can't remember who someone is.</p></div></header>
     <div class="card">
       <h2>Create a group from keywords</h2>
-      <p class="muted small">Searches the places you tick below for any of your keywords, shows you who matches, and tags them when you are happy. Bios are loaded for ${fmtNum(withBio)} of ${fmtNum(allListedPks().length)} accounts.</p>
+      <p class="muted small">Searches wherever you tick below, shows you who matches, and tags them once you're happy. Bios are loaded for ${fmtNum(withBio)} of ${fmtNum(allListedPks().length)} accounts.</p>
       <div class="inline-form">
         <input id="kwTag" placeholder="Group name, for example college" value="${esc(S.kw.tag)}" autocomplete="off">
         <input id="kwWords" placeholder="Keywords, comma separated: MIT, Massachusetts Institute" value="${esc(S.kw.words)}" autocomplete="off">
@@ -1699,7 +1699,7 @@ function renderSettings() {
   const ids = Object.keys(S.accounts);
   const imp = S.account?.exportImport;
   main.innerHTML = `
-    <header class="page-head"><div><h1>Settings</h1><p class="sub">Everything is stored in this browser only.</p></div></header>
+    <header class="page-head"><div><h1>Settings</h1><p class="sub">All of it stays in this browser.</p></div></header>
     <div class="card">
       <h2>Scanning</h2>
       <div class="field"><div><div class="lbl">Automatic scans</div><div class="desc">Runs in a background Instagram tab and closes it afterwards. You need to stay logged in.</div></div>
@@ -1787,7 +1787,7 @@ function renderSettings() {
     </div>
     <div class="card">
       <h2>About</h2>
-      <p class="muted small">This extension talks only to instagram.com, using the same requests the website makes when you open your followers list. It is not affiliated with Instagram. Automated actions can be against Instagram's terms, so use the follow and unfollow features sparingly.</p>
+      <p class="muted small">This extension talks only to instagram.com, using the same requests the website makes when you open your followers list. It isn't affiliated with Instagram. Automating follows and unfollows is arguably against Instagram's terms, so go easy on those, and know it's your account on the line.</p>
     </div>`;
   observeAvatars();
 }
@@ -2046,12 +2046,12 @@ async function onMainClick(e) {
       const listRows = r.rows.filter((x) => x.kind !== 'profile');
       const profileOk = r.rows.some((x) => x.kind === 'profile' && x.ok);
       let verdict;
-      if (!failed.length) verdict = '<div class="callout info">Every request worked. Whatever went wrong earlier has passed, so run a scan.</div>';
+      if (!failed.length) verdict = '<div class="callout info">Everything answered. Whatever was wrong earlier has passed, so try a scan.</div>';
       else if (r.rows.some((x) => x.throttled)) verdict = '<div class="callout warn">Instagram is rate limiting your account right now. Wait 10 to 15 minutes and run this again.</div>';
       else if (r.rows.some((x) => x.fatal)) verdict = '<div class="callout danger">Instagram wants you to log in again or finish a security check. Open the Instagram tab, sort that out, then try again.</div>';
-      else if (worked.length) verdict = `<div class="callout warn">Some shapes work and some do not. The scan tries them in order and sticks with whichever answers, so a scan should get through. Working: ${esc(worked.map((x) => x.label).join('; '))}.</div>`;
+      else if (worked.length) verdict = `<div class="callout warn">Some shapes work and some don't. The scan tries them in order and sticks with whichever answers, so a scan should get through. Working: ${esc(worked.map((x) => x.label).join('; '))}.</div>`;
       else if (profileOk) verdict = `<div class="callout danger">Your session is fine, since your profile loads, but Instagram will not return the followers list in any shape the extension knows. ${S.learned?.followers ? 'A copy of the website\'s own request has been learned, so the scan will use that instead. Try scanning.' : 'Open your followers list on instagram.com, scroll it a little, then come back and scan. The extension will copy the request the site itself makes.'}</div>`;
-      else verdict = '<div class="callout danger">Instagram refused everything, including your own profile. Reload the Instagram tab, make sure you are logged in, and try again in an hour.</div>';
+      else verdict = '<div class="callout danger">Instagram refused everything, including your own profile. Reload the Instagram tab, check you\'re logged in, and try again in an hour.</div>';
       if (out) out.innerHTML = verdict + `<div class="table-wrap"><table class="hist"><thead><tr><th>Request</th><th>Result</th><th>Status</th><th>Time</th><th style="text-align:left">What Instagram sent</th></tr></thead><tbody>${rows}</tbody></table></div>
         ${sample ? `<details style="margin-top:10px"><summary class="muted small">What Instagram actually sent back (first 600 characters)</summary><div class="log" style="margin-top:6px">${esc(sample.body || '')}</div><div class="muted small">${esc(sample.path)} → ${esc(sample.url || '')}${sample.redirected ? ' (redirected)' : ''} · ${esc(sample.ct || '')}</div></details>` : ''}
         <button class="btn sm" style="margin-top:8px" data-act="copyDiag" data-text="${esc(JSON.stringify({ rows: r.rows, sample }))}">Copy details</button>`;
